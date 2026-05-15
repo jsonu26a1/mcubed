@@ -1,214 +1,197 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::rc::Rc;
-
 
 pub type Name = Rc<str>;
 
-
-
-pub struct Schema {
-    models: Vec<Model>,
-    model_names: BTreeMap<Name, usize>,
-    // TODO I'm unsure if we actually need this field;
-    // relations: Vec<Relation>,
+pub struct DatabaseSchema {
+    // sorted by name
+    models: Box<[Rc<ModelSchema>]>,
 }
 
-impl Schema {
-    pub fn models(&self) -> &[Model] {
+impl DatabaseSchema {
+    pub fn models(&self) -> &[Rc<ModelSchema>] {
         &self.models
     }
-    pub fn get(&self, name: impl AsRef<str>) -> Option<&Model> {
-        self.models.get(*self.model_names.get(name.as_ref())?)
-    }
 }
 
-
-
-pub struct Model {
-    id: usize,
+pub struct ModelSchema {
     name: Name,
-    fields: Vec<(Name, SchemaField)>,
-    field_names: BTreeMap<Name, usize>,
+    fields: Box<[(Name, FieldSchema)]>,
+    // maps from name to id (slice is sorted by field Name)
+    fields_by_name: Box<[usize]>,
 }
 
-impl Model {
-    pub fn id(&self) -> usize {
-        self.id
-    }
-
+impl ModelSchema {
     pub fn name(&self) -> &Name {
         &self.name
     }
 
-    pub fn fields(&self) -> &[(Name, SchemaField)] {
+    pub fn fields(&self) -> &[(Name, FieldSchema)] {
         &self.fields
     }
 
-    pub fn get(&self, name: impl AsRef<str>) -> Option<&(Name, SchemaField)> {
-        self.fields.get(*self.field_names.get(name.as_ref())?)
+    pub fn field(&self, name: impl AsRef<str>) -> Option<&(Name, FieldSchema)> {
+        let name = name.as_ref();
+        let id = self.fields_by_name.binary_search_by(|id| {
+            let field = &self.fields[*id];
+            name.cmp(&*field.0)
+        }).ok()?;
+        Some(&self.fields[id])
     }
 }
 
-
-#[derive(Copy, Clone)]
-pub enum FieldType {
-    Text,
-    Int,
-    Real,
-    Buffer,
+struct ModelBuilder {
+    name: Name,
+    fields: HashMap<Name, (usize, FieldSchema)>,
 }
 
-
-
-pub enum SchemaField {
-    Text,
-    Int,
-    Real,
-    Buffer,
-    RelationOne { model_id: usize, field: usize },
-    RelationMany { model_id: usize, field: usize },
-}
-
-impl From<FieldType> for SchemaField {
-    fn from(ftype: FieldType) -> Self {
-        match ftype {
-            FieldType::Text => Self::Text,
-            FieldType::Int => Self::Int,
-            FieldType::Real => Self::Real,
-            FieldType::Buffer => Self::Buffer,
+impl ModelBuilder {
+    fn finish(self) -> ModelSchema {
+        let mut i = self.fields.into_iter().collect::<Vec<_>>();
+        i.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let fields_by_name = i.iter().map(|&(_, (id, _))| id).collect();
+        i.sort_by_key(|&(_, (id, _))| id);
+        let fields = i.into_iter().map(|(name, (_, field))| (name, field)).collect();
+        ModelSchema {
+            name: self.name,
+            fields,
+            fields_by_name,
         }
     }
 }
 
-
-/*
-I think I got some things backwards with "one-to-many";
-suppose we have models Track and Album;
-Track should have a field "album" which is SchemaField::RelationOne { model: Album, field: "tracks" };
-Album should have a field "tracks" which is SchemaField::RelationMany { model: Track, field: "album" };
-to declare this, we would call SchemaBuilder::relation(RelationKind::ManyToOne, Album, "tracks", Track, "album");
-Album has many "tracks", but Track has one "album"; hence, RelationKind::ManyToOne
-
-where I got confused was with struct Relation and it's field `many: bool`, and the semantics of "from" and "to".
-but I'm not even sure we need that field! so I won't worry about it now.
-
-*/
-
-// pub struct Relation {
-//     from_model: usize,
-//     from_field: usize,
-//     to_model: usize,
-//     to_field: usize,
-//     many: bool,
-// }
-
-
-
-pub enum RelationKind {
-    ManyToMany,
-    ManyToOne,
-    OneToOne,
-    // OneToMany,
+#[derive(Clone)]
+pub enum FieldType {
+    Int,
+    Real,
+    Text,
+    Buffer,
+    Tuple(Vec<FieldType>),
+    List(Box<FieldType>),
 }
 
+#[derive(Clone)]
+pub enum FieldSchema {
+    Int,
+    Real,
+    Text,
+    Buffer,
+    Tuple(Vec<FieldType>),
+    List(FieldType),
+    RelationOne { model: Name, field: Name },
+    RelationMany { model: Name, field: Name },
+}
 
+impl From<FieldType> for FieldSchema {
+    fn from(ftype: FieldType) -> Self {
+        match ftype {
+            FieldType::Int => Self::Int,
+            FieldType::Real => Self::Real,
+            FieldType::Text => Self::Text,
+            FieldType::Buffer => Self::Buffer,
+            FieldType::Tuple(t) => Self::Tuple(t),
+            FieldType::List(l) => Self::List(*l),
+        }
+    }
+}
+
+pub enum RelationKind {
+    OneToOne,
+    OneToMany,
+    ManyToMany,
+}
 
 pub struct SchemaBuilder {
-    schema: Schema,
+    models: HashMap<Name, ModelBuilder>,
 }
 
 impl SchemaBuilder {
     pub fn new() -> Self {
         Self {
-            schema: Schema {
-                models: vec![],
-                model_names: BTreeMap::new(),
-                // relations: vec![],
-            }
+            models: HashMap::new(),
         }
     }
 
-    pub fn finish(self) -> Schema {
-        self.schema
+    pub fn finish(self) -> DatabaseSchema {
+        let mut models: Box<[Rc<ModelSchema>]> = self.models.into_values().map(|mb| Rc::new(mb.finish())).collect();
+        models.sort_by(|a, b| a.name.cmp(&b.name));
+        DatabaseSchema {
+            models,
+        }
     }
 
-    pub fn model(&mut self, name: &str, fields: &[(&str, FieldType)]) -> Result<Name, String> {
-        let schema = &mut self.schema;
-        if schema.model_names.contains_key(name) {
+    pub fn model(&mut self, name: impl Into<Name> + AsRef<str>, fields: impl IntoIterator<Item=(impl Into<Name> + AsRef<str>, FieldType)>) -> Result<Name, String> {
+        let name = name.as_ref();
+        if self.models.contains_key(name) {
             return Err("model name already exists".into());
         }
         let name: Name = name.into();
-        let mut model = Model {
-            id: schema.models.len(),
+        let mut model = ModelBuilder {
             name: name.clone(),
-            fields: vec![],
-            field_names: BTreeMap::new(),
+            fields: HashMap::new(),
         };
         for (fname, ftype) in fields {
-            let fname: Name = (*fname).into();
-            if model.field_names.contains_key(&fname) {
+            let fid = model.fields.len();
+            // let fname: Name = ;
+            if model.fields.contains_key(fname.as_ref()) {
                 return Err("field name already exists on model".into());
             }
-            model.field_names.insert(fname.clone(), model.fields.len());
-            model.fields.push((fname, (*ftype).into()));
-            // model.fields.push((fname, SchemaField::from(*ftype)));
+            model.fields.insert(fname.into(), (fid, ftype.into()));
         }
-        schema.model_names.insert(name.clone(), schema.models.len());
-        schema.models.push(model);
+        self.models.insert(name.clone(), model);
         Ok(name)
     }
 
-    pub fn relation<A1, A2, B1, B2>(&mut self, kind: RelationKind, a_model: A1, a_field: A2, b_model: B1, b_field: B2) -> Result<(), String>
+    pub fn relation<A1, A2, B1, B2>(&mut self, kind: RelationKind, model_a: A1, field_a: A2, model_b: B1, field_b: B2) -> Result<(), String>
     where
         A1: AsRef<str>,
         A2: Into<Name> + AsRef<str>,
         B1: AsRef<str>,
         B2: Into<Name> + AsRef<str>,
     {
-        let schema = &mut self.schema;
-        let a_id = *schema.model_names.get(a_model.as_ref()).ok_or_else(|| "model name not found")?;
-        let b_id = *schema.model_names.get(b_model.as_ref()).ok_or_else(|| "model name not found")?;
-        let a = &schema.models[a_id];
-        let b = &schema.models[b_id];
-        if a.field_names.contains_key(a_field.as_ref()) {
-            return Err("field name already exists on model".into());
+        let model_a = model_a.as_ref();
+        let model_b = model_b.as_ref();
+        let a = self.models.get(model_a).ok_or_else(|| "model_a name not found")?;
+        let b = self.models.get(model_b).ok_or_else(|| "model_b name not found")?;
+        if a.fields.contains_key(field_a.as_ref()) {
+            return Err("field name already exists on model_a".into());
         }
-        if b.field_names.contains_key(b_field.as_ref()) {
-            return Err("field name already exists on model".into());
+        if b.fields.contains_key(field_b.as_ref()) {
+            return Err("field name already exists on model_b".into());
         }
-        let a_fname = a_field.into();
-        let a_fid = a.fields.len();
-        let b_fname = b_field.into();
-        let b_fid = b.fields.len();
-        schema.models[a_id].field_names.insert(a_fname.clone(), a_fid);
-        schema.models[b_id].field_names.insert(b_fname.clone(), b_fid);
-        let (a_many, b_many) = match kind {
-            RelationKind::ManyToMany => (true,  true),
-            RelationKind::ManyToOne =>  (true,  false),
+        let model_a_name = a.name.clone();
+        let model_b_name = b.name.clone();
+        let fid_a = a.fields.len();
+        let fid_b = b.fields.len();
+        let field_a = field_a.into();
+        let field_b = field_b.into();
+        let (many_a, many_b) = match kind {
             RelationKind::OneToOne =>   (false, false),
-            // RelationKind::OneToMany =>  (false, true),
+            RelationKind::OneToMany =>  (false, true),
+            RelationKind::ManyToMany => (true,  true),
         };
-        if a_many {
-            schema.models[a_id].fields.push((a_fname, SchemaField::RelationMany { model_id: b_id, field: b_fid }));
+        if many_a {
+            self.models.get_mut(model_a).unwrap().fields.insert(field_a.clone(), (fid_a, FieldSchema::RelationMany {
+                model: model_b_name.clone(),
+                field: field_b.clone(),
+            }));
         } else {
-            schema.models[a_id].fields.push((a_fname, SchemaField::RelationOne { model_id: b_id, field: b_fid }));
+            self.models.get_mut(model_a).unwrap().fields.insert(field_a.clone(), (fid_a, FieldSchema::RelationOne {
+                model: model_b_name.clone(),
+                field: field_b.clone(),
+            }));
         }
-        if b_many {
-            schema.models[b_id].fields.push((b_fname, SchemaField::RelationMany { model_id: a_id, field: a_fid }));
+        if many_b {
+            self.models.get_mut(model_b).unwrap().fields.insert(field_b.clone(), (fid_b, FieldSchema::RelationMany {
+                model: model_a_name.clone(),
+                field: field_a.clone(),
+            }));
         } else {
-            schema.models[b_id].fields.push((b_fname, SchemaField::RelationOne { model_id: a_id, field: a_fid }));
+            self.models.get_mut(model_b).unwrap().fields.insert(field_b.clone(), (fid_b, FieldSchema::RelationOne {
+                model: model_a_name.clone(),
+                field: field_a.clone(),
+            }));
         }
-        // schema.relations.push(Relation { from_model: a.id, from_field: a_fid, to_model: b.id, to_field: b_fid, many: b_many });
-        // schema.relations.push(Relation { from_model: b.id, from_field: b_fid, to_model: a.id, to_field: a_fid, many: a_many });
         Ok(())
     }
 }
-
-/*
-TODO; calling SchemaBuilder::relation, many_model has to look up the Name in a btree. but we could create a "ModelRef" type,
-which can either be a Name or an id: usize, with an IntoModelRef trait that converts an id: usize or Name (or the From/Into
-trait would be better). then, SchemaBuilder::model could return an id: usize instead of a Name; and the API would be a bit
-more flexible. but this would definitely be a premature optimization; schema building only happens once, it's easier to just
-use Name to refer to a model, and there's not a huge benefit to supporting looking up by id: usize here. maybe later tho?
-*/
-
