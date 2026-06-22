@@ -1,0 +1,68 @@
+2026-06-15
+==========
+
+in EmptyList::alloc, we're doing a bunch of small writes when we allocate a new block; each RootHeader:set_* method makes a write call to the backend. I was thinking, maybe we should batch these filesystem updates? I think the OS will do some amount of caching/batch (that's why there's the File::sync_data() method). I don't know which way to do things. but I should just leave it how it is right now; we can always dig into how to optimize things later. 
+
+
+--------
+
+
+I've been doing some thinking about the "tree" data implementation. I was reading about how redb does things, and considering what design choices to my for my version. specifically, how to handle key and value data types. redb serializes these data types within the "table definition"; ~~so it knows when opening a table, what the data widths for keys and values will be (if fixed) or if they are dynamic/variable.~~ so when you open a table, it checks what key-value-types the table was created with. (strangely, there's no way to open a table if you don't precisely know the type beforehand; UntypedTableHandle only lets you query the length and storage stats. theoretically, redb knows the data types, and could provide raw readonly access to the data, but I guess that feature is too niche to implement).
+
+while looking at redb's source code, I noticed some odd quirks...
+
+the way redb handles things, the data width for key-value-types is always known (from the table definition used to open the table). when a data type is not fixed width (dynamically sized, like String or byte slice), a list is included before the dyn-sized data in the file, containing the end offset of each entry. I take issue with this approach in a couple of ways; 1) this means an extremely long key might need to be stored more than once; in addition to the leaf node, it might be present in one or more branch/internal nodes. (wouldn't it only be at most twice? yes, I believe it would only appear in at most one branch node).
+
+redb also has an unusual "region/paging" system. I can store a 10 MiB key in redb, and the file size becomes over 30 MiB. and I believe that 10 MiB key is being stored *inline* within the tree nodes, meaning there's a lot of copying to be done when a new value is inserted, and the position of that value within a node changes. now, redb does advise using a "side car" file for large values (greater than a few MiB), or else there's a bad performance (see comment in examples/special_values.rs). so it's not like this that massive of an issue; most dyn-sized keys and values will not be that large, maybe around 1 KiB, so having them duplicated or needing to copy them for insertions/removals for isn't a huge deal.
+
+however, that region/paging system means there's a lot of wasted space when dealing with huge keys and values stored in nodes. I did some tests with writing large keys and the resulting file size of the database, and it's quite inefficient. an empty database is always about 1 MiB, and as I said above, a 10 MiB key took up more than 3x the space. while this flexible region allocation system does let them have these very large contiguous chunks that can be filled with values; (now that I think about it...)
+
+(aside) now that I think about it... (cont), how does redb decide how many items are stored in a single node?
+in `redb::tree_store::btree_base::BranchBuilder::should_split()`:
+  `size > self.page_allocator.get_page_size() && self.keys.len() >= 3`
+so if the size of node is greater than 4 KiB, and it has at least 3 items, it will split. this doesn't make sense to me... so if you have a large key, it will cause the node it ends up in to be constantly split...
+
+
+
+so I think for our "BlockTree" implementation, we will handle large keys and values using "pointers"; if the data is fixed-sized, what we store inline in the node is an "address" containing the data; the BlockTree will have a list of BlockIndex's which represent it's "address space" when concatenated together. if the data is dyn-sized, "tagged" pointers will be used; if the data's length is larger than a `block_size`, instead of pointing into the BlockTree's shared "address space", it will be a BlockIndex to a dedicated block which has more information about where to locate the data.
+
+when data is removed from the BlockTree that are allocated in the address space, the freed slots will be tracked so they can be reused, similar to how freed Blocks are tracked by the Emptylist in the RootHeader. if there's a lot of unused slots (a lot of items are removed), the BlockTree can "compact" the address space by reallocating the values and updating the pointers within the nodes, so they're all contiguous again. however, this would require iterating over all the items in the tree.
+
+for "compacting" the RootHeader's EmptyList, I came up with a work around to optimize the process. (it could technically work for compacting a BlockTree's address space, but might not be worth it). when compacting entire file, it would be very expensive to walk every BlockTree in the entire file and then reallocate blocks with high BlockIndex's (to fill "holes" in the EmptyList) so we can truncate the file (reducing it's size). my idea is to have a "block reallocation lookup table" (a special BlockTree that maps from a original BlockIndex to reallocated BlockIndex). every time a block is accessed, it's BlockIndex is first looked up in this tree. if it's not present, the access occurs unchanged. if it is present, the new BlockIndex is accessed instead. during a "quick compaction", instead of walking every BlockTree (and other data structures) so that certain BlockIndex's can be updated/reallocated, the BlockIndex mappings representing a reallocation are written to this "reallocation table". when a new block is allocated that extends the file, the BlockIndex is looked up in the allocation table; if it's present, the existing "reallocated data" is moved to this new block at the end of the file, the entry is removed from the table, and the newly allocated BlockIndex is the block that the data was just moved from.
+
+
+
+back to impl "BlockTree", I guess we could use a similar logic to redb, with how data type width is inferred; if a data type has a width >= 8 bytes, then the "address pointer" system will be used; (u64 address). if data type is dyn-sized/variable width, use tagged pointer, with small data fitting in (this could also be u64 address, with highest bit being the tag).
+
+however, this "inferred/implicit typing" means that we: 1) can't read the BlockTree if the key-value-types are unknown, and 2) the user is forced to use the "pointer" abstraction even if they would rather not (for fixed-sized types, dyn-sized would always require pointers). so instead, I will use "explicit typing", where this info is included in the metadata of the tree's root node/header.
+
+
+
+2026-06-16
+==========
+
+I was thinking again about our format vs redb. redb supports allocating pages that are contiguous; the pages are all located next to each other within the file (and probably on the disk, depending on the device/filesystem) ... (at least<I think this is the case. I'm not entire sure how the "region allocator" system works). where as with our format, allocating several blocks might reuse empty blocks at various places within the file, and the blocks are not guaranteed to be contiguous/adjacent to each other.
+
+now, to support allocating blocks that are adjacent to each other, we could have an API that only allocates new blocks by extending the end of the file, ignoring the empty list. I'm not sure if that's "good enough"; under what circumstances would this API be chosen over normal allocation? the user application would have decide when to use this. I suppose the allocation API could have a simple flag "contiguous", which would ensure that the BlockIndexes returned are sequential. the only "issue" with this process is that when those contiguous blocks are freed, they would just be added to the RootHeader's EmptyList, and could not be reused as contiguous.
+
+now, we could have a special BlockTree, which is a table that maps BlockIndex to extra metadata about these contiguously allocated blocks; when they are allocated, they are added to this table, which stores their length, and if they are still allocated or have been freed. when these blocks are freed, instead of being put in the EmptyList, their entry in the table is updated. the next time a contiguous allocation is requested, this table is consulted; I suppose there would have to be an additional table, which maps "# of contiguous blocks" to a list of starting BlockIndex's; this way, when allocating another group of contiguous blocks, these tables would be consulted; one that enables searching for freed contiguous ranges of blocks, and another tracks if this range is still in use or empty.
+
+if say 16 contiguous blocks were requested to be allocated, and the table contained an empty range of 20 contiguous blocks, 16 of the 20 could be used, and the remaining 4 could be marked as contiguous and put back in the table.
+
+hmm, when the file is being compacted, this complicates things a bit. previously when I described compaction, I said that blocks near the end of the file can be reallocated using a reallocation table. but if a range of contiguous blocks is at the end of the file (which might be quite common, since that's how they are allocated, by extending the file in a large chunk). to reallocate a block now, that table of contiguous block ranges must be consulted; that table would need store both the starting BlockIndex and ending BlockIndex, which would allow querying to see if a particular block is part of a range (when searching, the closest entry in the table is looked at; if it's a starting index, the query is not in a contiguous range. if it's an ending index, the query belongs to that range).
+
+say a file has a contiguous range of 16 blocks located at the end of the file, the EmptyList has 3 blocks, and now the file is being compacted. the 3 blocks preceding the contiguous range would need to be reallocated, then all 16 contiguous blocks would need to be reallocated, shifting them back by 3 blocks. this would require 19 entries to be added to the reallocation table.
+
+is this an excessive amount of entries to add to the reallocation table? we could reuse the technique used with the contiguous table, where we record both the start and end indexes; but it would make the lookup algorithm more complex. the issue, is when trying to access a block, we do not know if that block belongs to a contiguous range or not. we look up the BlockIndex in the reallocation table to let us reallocate blocks during compaction without having to walk every BlockTree in the file, correcting BlockIndex pointers...
+
+
+
+so to support contiguous regions of blocks, we will need to add a table that tracks contiguously allocated regions of blocks (mapping BlockIndex to some metadata about them), another table that let's us look up contiguous regions by size (mapping "number of blocks" to a list of BlockIndex). when a block is being accessed and looked up in the reallocation table, instead of just checking if the BlockIndex key exists in the tree (and rerouting the access to the reallocated/correct BlockIndex), we much access the next largest key, and see if the value is tagged, signifying that the key represents an "end offset", and that the previous key is the "start offset" of a contiguous region; when a BlockIndex belongs to a reallocated contiguous region, it's resolved index must be calculated using the starting BlockIndex of the region.
+
+(maybe "contiguous span" would be a better term to use)
+
+should it be a hard error, to attempt to individually free a block that belongs to a contiguous region?
+
+
+
+now that I think about it, it might be beneficial to use a BlockTree to store the "EmptyList", the list of free blocks. this way, when allocating a new block, we always use the lowest BlockIndex, and keep BlockIndex's near the end of the file free; this would help with
