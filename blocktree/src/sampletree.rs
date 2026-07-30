@@ -6,6 +6,7 @@ use std::ops::{RangeBounds, Bound};
 
 pub struct SampleTree {
     pub order: u32,
+    // pub minimum: u32,
     pub height: u32,
     pub len: u64,
     pub first_leaf: Rc<LeafNode>,
@@ -13,6 +14,20 @@ pub struct SampleTree {
     pub next_id: i32,
 }
 
+/*
+SampleTree is technically a "B+ Tree"; internal nodes do not store values, the keys between edges
+correspond to the last value of the left-edge. however, I plan on updating it to be a "B*+ Tree",
+which means the minimum number of items per node is configurable (maybe 2/3 of `order`), to reduce
+the amount of free slots in nodes, which is "being wasted".
+
+hmmm, I'm not sure if we want to use `B*+ Tree` or a regular `B+ Tree`. the trade off is that
+insertions might require updating more blocks. maybe it turns out that that isn't desirable? I
+guess for now, I will juse assume `minimum == order / 2`, like how insert() is currently
+implemented. I'll have to write a new implementation later to compare the two.
+*/
+
+// `order` is the maximum number of items per node (edges per internal node, values per leaf node)
+// `minimum` is the minimum number of items per node
 impl SampleTree {
     pub fn new(order: u32) -> Self {
         let leaf: Rc<LeafNode> = LeafNode::new(0).into();
@@ -25,6 +40,22 @@ impl SampleTree {
             next_id: 1,
         }
     }
+    // TODO: `minimum` isn't supported at the moment; insert() assumes it will be `order / 2`
+    // pub fn new(order: u32) -> Self {
+    //     Self::new_ext(order, order / 2)
+    // }
+    // pub fn new_ext(order: u32, minimum: u32) -> Self {
+    //     let leaf: Rc<LeafNode> = LeafNode::new(0).into();
+    //     Self {
+    //         order,
+    //         minimum,
+    //         height: 0,
+    //         len: 0,
+    //         first_leaf: leaf.clone(),
+    //         root: leaf.into(),
+    //         next_id: 1,
+    //     }
+    // }
     fn new_internal(&mut self) -> InternalNode {
         let node = InternalNode::new(self.next_id);
         self.next_id += 1;
@@ -77,6 +108,8 @@ impl SampleTree {
         }
     }
     // inserts key-value, and returns Some(n) if the key already existed, otherwise None
+    // TODO: insert() assumes `minimum` is `order / 2`; this needs to be updated for `minimum > order / 2`,
+    // where we spill over excess keys into an adjacent sibling...
     pub fn insert(&mut self, key: u64, value: u64) -> Option<u64> {
         let mut height = 0;
         let mut cursor = self.root.clone();
@@ -178,7 +211,8 @@ impl SampleTree {
         return None;
     }
 
-    // removes a value with the given key, returning Some(value) if existed and was removed, otherwise None
+    // removes and returns Some(value) with the given key, otherwise None if key not found
+    // currently doesn't work; I need to debugging this later
     pub fn remove(&mut self, key: u64) -> Option<u64> {
         let mut height = 0;
         let mut cursor = self.root.clone();
@@ -193,46 +227,265 @@ impl SampleTree {
         let leaf = cursor.leaf();
         let i = match leaf.keys().binary_search(&key) {
             Ok(i) => i,
-            Err(_) => return None;
+            Err(_) => return None,
         };
         self.len -= 1;
         let mut parents = parents.into_iter().rev();
 
-        // some edge cases; if i == leaf.keys.len() - 1, then we need to update parent's key (if
-        // right most, then bubble up)
-        // if leaf.keys.len() < lower (order / 2 - 1?), then we need to merge with adjacent node
-        // hmm, picturing this gets complicated... but there's a lot of states which appear
-        // problematic at first, but are actually unreachable. a node will never have less than 
-        // `lower`, unless the tree is almost empty, but then, that would be a leaf root node;
-        // internal nodes will never only have a single edge on them...
-
-
         leaf.keys().remove(i);
         let value = leaf.values().remove(i);
 
-        let mut new_right_most_key = if i == leaf.keys().len() {
-            leaf.keys().last()
-        } else {
-            None
-        };
+        let min_items = (self.order / 2) as usize;
+        let max_items = self.order as usize;
 
-        if leaf.keys().len() >= self.order / 2 as usize {
-            if let Some(new_key) = new_right_most_key {
+        if leaf.keys().len() >= min_items {
+            if i == leaf.keys().len() {
                 for (parent, i) in parents {
                     if i < parent.keys().len() {
-                        parent.keys()[i] = new_key;
+                        parent.keys()[i] = *leaf.keys().last().unwrap();
+                        // we can stop once we've found the key to update
+                        break;
                     }
                 }
             }
-            return None;
+            return Some(value);
         }
 
-        // merge leaf with adjacent leaf
-        let (parent, i) = match parents.next() {
-            
+        let (mut parent, mut i) = match parents.next() {
+            Some(t) => t,
+            None => {
+                // no parent, means this leaf node is the root of the tree; it is permitted
+                // to have fewer than min_items, since there are no sibling nodes to merge with
+                return Some(value);
+            }
+        };
+
+        let left_sibling = parent.edges().get(i.wrapping_sub(1)).map(|either| either.clone().leaf());
+        let right_sibling = parent.edges().get(i + 1).map(|either| either.clone().leaf());
+        enum Case {
+            BalanceFromLeft,
+            MergeWithLeft,
+            BalanceFromRight,
+            MergeWithRight,
+            MergeThree,
+        }
+        let case: Case;
+        if let Some(ref left_sibling) = left_sibling && let Some(ref right_sibling) = right_sibling {
+            let current_len = leaf.keys().len();
+            let left_len = left_sibling.keys().len();
+            let right_len = right_sibling.keys().len();
+            let left_available = max_items - left_len;
+            let right_available = max_items - right_len;
+            if left_available + right_available < current_len {
+                if left_len > right_len {
+                    // pop from end of left, insert at 0 in current
+                    case = Case::BalanceFromLeft;
+                } else {
+                    // remove at 0 from right, push to end of current
+                    case = Case::BalanceFromRight;
+                }
+            } else {
+                // split current's items between left and right (and remove current from parent)
+                case = Case::MergeThree;
+            }
+        } else if let Some(ref left_sibling) = left_sibling {
+            // one of left or right can be None when either:
+            // - parent internal node is root (tree height is 1)
+            // - OR leaf is first or last node in parent
+            case = if left_sibling.keys().len() > min_items {
+                // pop from end of left, insert at 0 in current
+                Case::BalanceFromLeft
+            } else {
+                Case::MergeWithLeft
+            };
+        } else if let Some(ref right_sibling) = right_sibling {
+            case = if right_sibling.keys().len() > min_items {
+                // remove at 0 from right, push to end of current
+                Case::BalanceFromRight
+            } else {
+                Case::MergeWithRight
+            };
+        } else {
+            // a non-root node should always have at least one sibling (left or right); an internal
+            // node will merge with a sibling if it ever has less children than min_items, or if it
+            // is the root node, replace itself with it's one remaining child.
+            unreachable!();
+        }
+        match case {
+            Case::BalanceFromLeft => {
+                // pop from end of left, insert at 0 in current
+                let left_sibling = left_sibling.unwrap();
+                leaf.keys().insert(0, left_sibling.keys().pop().unwrap());
+                leaf.values().insert(0, left_sibling.values().pop().unwrap());
+                parent.keys()[i - 1] = *left_sibling.keys().last().unwrap();
+                return Some(value);
+            },
+            Case::MergeWithLeft => {
+                let left_sibling = left_sibling.unwrap();
+                left_sibling.keys().extend(leaf.keys().drain(..));
+                left_sibling.values().extend(leaf.values().drain(..));
+                // remove the key associated with left_sibling, since it is now the last node
+                parent.keys().remove(i - 1);
+                parent.edges().remove(i);
+                let next = leaf.next().clone();
+                if let Some(ref next) = next {
+                    *next.prev() = Some(left_sibling.clone());
+                }
+                *left_sibling.next() = next;
+            },
+            Case::BalanceFromRight => {
+                // remove at 0 from right, push to end of current
+                let right_sibling = right_sibling.unwrap();
+                leaf.keys().push(right_sibling.keys().remove(0));
+                leaf.values().push(right_sibling.values().remove(0));
+                parent.keys()[i] = *leaf.keys().last().unwrap();
+                return Some(value);
+            },
+            Case::MergeWithRight => {
+                let right_sibling = right_sibling.unwrap();
+                leaf.keys().extend(right_sibling.keys().drain(..));
+                leaf.values().extend(right_sibling.values().drain(..));
+                std::mem::swap(&mut leaf.keys(), &mut right_sibling.keys());
+                std::mem::swap(&mut leaf.values(), &mut right_sibling.values());
+                parent.keys().remove(i);
+                parent.edges().remove(i);
+                let prev = leaf.prev().clone();
+                if let Some(ref prev) = prev {
+                    *prev.next() = Some(right_sibling.clone());
+                }
+                *right_sibling.prev() = prev;
+            },
+            Case::MergeThree => {
+                // split current's items between left and right (and remove current from parent)
+                let left_sibling = left_sibling.unwrap();
+                let right_sibling = right_sibling.unwrap();
+                let leaf_len = leaf.keys().len();
+                let mid = std::cmp::min(max_items - left_sibling.keys().len(), leaf_len / 2);
+                let mut rem_keys = leaf.keys().split_off(mid);
+                let mut rem_values = leaf.values().split_off(mid);
+                left_sibling.keys().extend(leaf.keys().drain(..));
+                left_sibling.values().extend(leaf.values().drain(..));
+                rem_keys.extend(right_sibling.keys().drain(..));
+                rem_values.extend(right_sibling.values().drain(..));
+                *right_sibling.keys() = rem_keys;
+                *right_sibling.values() = rem_values;
+                parent.keys()[i - 1] = *left_sibling.keys().last().unwrap();
+                parent.keys().remove(i);
+                parent.edges().remove(i);
+                *left_sibling.next() = Some(right_sibling.clone());
+                *right_sibling.prev() = Some(left_sibling.clone());
+            },
         }
 
-        todo!();
+        // re-balance parent
+        let mut current;
+        loop {
+            current = parent;
+            if current.keys().len() >= min_items {
+                break;
+            }
+            (parent, i) = match parents.next() {
+                Some(t) => t,
+                None => {
+                    // `current` is the root node, which is permitted to be below min_items
+                    if current.edges().len() == 1 {
+                        // self.root = current.edges().pop().unwrap().into();
+                        // self.height -= 1;
+                    }
+                    break;
+                }
+            };
+            let left_sibling = parent.edges().get(i.wrapping_sub(1)).map(|either| either.clone().internal());
+            let right_sibling = parent.edges().get(i + 1).map(|either| either.clone().internal());
+            let case: Case;
+            if let Some(ref left_sibling) = left_sibling && let Some(ref right_sibling) = right_sibling {
+                let current_len = current.keys().len();
+                let left_len = left_sibling.keys().len();
+                let right_len = right_sibling.keys().len();
+                let left_available = max_items - left_len;
+                let right_available = max_items - right_len;
+                if left_available + right_available < current_len {
+                    if left_len > right_len {
+                        case = Case::BalanceFromLeft;
+                    } else {
+                        case = Case::BalanceFromRight;
+                    }
+                } else {
+                    case = Case::MergeThree;
+                }
+            } else if let Some(ref left_sibling) = left_sibling {
+                case = if left_sibling.keys().len() > min_items {
+                    Case::BalanceFromLeft
+                } else {
+                    Case::MergeWithLeft
+                };
+            } else if let Some(ref right_sibling) = right_sibling {
+                case = if right_sibling.keys().len() > min_items {
+                    Case::BalanceFromRight
+                } else {
+                    Case::MergeWithRight
+                };
+            } else {
+                // a non-root node should always have at least one sibling (left or right); an internal
+                // node will merge with a sibling if it ever has less children than min_items, or if it
+                // is the root node, replace itself with it's one remaining child.
+                unreachable!();
+            }
+            match case {
+                Case::BalanceFromLeft => {
+                    // pop from end of left, insert at 0 in current
+                    let left_sibling = left_sibling.unwrap();
+                    current.keys().insert(0, left_sibling.keys().pop().unwrap());
+                    current.edges().insert(0, left_sibling.edges().pop().unwrap());
+                    parent.keys()[i - 1] = *left_sibling.keys().last().unwrap();
+                    break
+                },
+                Case::MergeWithLeft => {
+                    let left_sibling = left_sibling.unwrap();
+                    left_sibling.keys().extend(current.keys().drain(..));
+                    left_sibling.edges().extend(current.edges().drain(..));
+                    // remove the key associated with left_sibling, since it is now the last node
+                    parent.keys().remove(i - 1);
+                    parent.edges().remove(i);
+                },
+                Case::BalanceFromRight => {
+                    // remove at 0 from right, push to end of current
+                    let right_sibling = right_sibling.unwrap();
+                    current.keys().push(right_sibling.keys().remove(0));
+                    current.edges().push(right_sibling.edges().remove(0));
+                    parent.keys()[i] = *current.keys().last().unwrap();
+                    break;
+                },
+                Case::MergeWithRight => {
+                    let right_sibling = right_sibling.unwrap();
+                    current.keys().extend(right_sibling.keys().drain(..));
+                    current.edges().extend(right_sibling.edges().drain(..));
+                    std::mem::swap(&mut current.keys(), &mut right_sibling.keys());
+                    std::mem::swap(&mut current.edges(), &mut right_sibling.edges());
+                    parent.keys().remove(i);
+                    parent.edges().remove(i);
+                },
+                Case::MergeThree => {
+                    // split current's items between left and right (and remove current from parent)
+                    let left_sibling = left_sibling.unwrap();
+                    let right_sibling = right_sibling.unwrap();
+                    let current_len = current.keys().len();
+                    let mid = std::cmp::min(max_items - left_sibling.keys().len(), current_len / 2);
+                    let mut rem_keys = current.keys().split_off(mid);
+                    let mut rem_values = current.edges().split_off(mid);
+                    left_sibling.keys().extend(current.keys().drain(..));
+                    left_sibling.edges().extend(current.edges().drain(..));
+                    rem_keys.extend(right_sibling.keys().drain(..));
+                    rem_values.extend(right_sibling.edges().drain(..));
+                    *right_sibling.keys() = rem_keys;
+                    *right_sibling.edges() = rem_values;
+                    parent.keys()[i - 1] = *left_sibling.keys().last().unwrap();
+                    parent.keys().remove(i);
+                    parent.edges().remove(i);
+                },
+            }
+        }
+        return Some(value);
     }
 }
 
