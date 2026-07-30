@@ -66,12 +66,73 @@ impl SampleTree {
         self.next_id += 1;
         node
     }
+    // for this demo impl, construct a vec instead of a true iterator
     pub fn iter(&self) -> Vec<(u64, u64)> {
         let mut out = vec![];
         let mut some_leaf = Some(self.first_leaf.clone());
         while let Some(leaf) = some_leaf {
             out.extend(leaf.keys().iter().map(|k| *k).zip(leaf.values().iter().map(|v| *v)));
             some_leaf = leaf.next().clone();
+        }
+        out
+    }
+    pub fn iter_range(&self, range: impl RangeBounds<u64>) -> Vec<(u64, u64)> {
+        let mut out = vec![];
+        let mut next_leaf = match range.start_bound() {
+            Bound::Unbounded => {
+                out.extend(self.first_leaf.keys().iter().map(|k| *k).zip(self.first_leaf.values().iter().map(|v| *v)));
+                self.first_leaf.next().clone()
+            },
+            Bound::Included(key) | Bound::Excluded(key) => {
+                let mut height = 0;
+                let mut cursor = self.root.clone();
+                while height < self.height {
+                    height += 1;
+                    let internal = cursor.internal();
+                    cursor =
+                        internal.edges()[internal.keys().binary_search(key).map_or_else(|i| i, |i| i)].clone();
+                }
+                let leaf = cursor.leaf();
+                let i = match leaf.keys().binary_search(key) {
+                    Ok(i) => if let Bound::Excluded(_) = range.start_bound() {
+                            i + 1
+                        } else {
+                            i
+                        },
+                    Err(i) => i,
+                };
+                if i < leaf.keys().len() {
+                    out.extend(leaf.keys()[i..].iter().map(|k| *k).zip(leaf.values()[i..].iter().map(|v| *v)));
+                }
+                leaf.next().clone()
+            },
+        };
+        let end_key = match range.end_bound() {
+            Bound::Unbounded => None,
+            Bound::Included(key) | Bound::Excluded(key) => Some(*key),
+        };
+        loop {
+            let leaf = match next_leaf {
+                Some(l) => l,
+                None => break,
+            };
+            let leaf_keys = leaf.keys();
+            if let Some(key) = end_key && *leaf_keys.last().unwrap() > key {
+                let end = match leaf_keys.binary_search(&key) {
+                    Ok(i) => if let Bound::Excluded(_) = range.end_bound() && key == leaf_keys[i] {
+                            Bound::Excluded(i)
+                        } else {
+                            Bound::Included(i)
+                        },
+                    Err(i) => Bound::Excluded(i)
+                };
+                let r = (Bound::Unbounded, end);
+                out.extend(leaf_keys[r].iter().map(|k| *k).zip(leaf.values()[r].iter().map(|v| *v)));
+                break;
+            } else {
+                out.extend(leaf_keys[..].iter().map(|k| *k).zip(leaf.values()[..].iter().map(|v| *v)));
+                next_leaf = leaf.next().clone();
+            }
         }
         out
     }
@@ -345,13 +406,15 @@ impl SampleTree {
                 let right_sibling = right_sibling.unwrap();
                 leaf.keys().extend(right_sibling.keys().drain(..));
                 leaf.values().extend(right_sibling.values().drain(..));
-                std::mem::swap(&mut leaf.keys(), &mut right_sibling.keys());
-                std::mem::swap(&mut leaf.values(), &mut right_sibling.values());
+                std::mem::swap(&mut *leaf.keys(), &mut *right_sibling.keys());
+                std::mem::swap(&mut *leaf.values(), &mut *right_sibling.values());
                 parent.keys().remove(i);
                 parent.edges().remove(i);
                 let prev = leaf.prev().clone();
                 if let Some(ref prev) = prev {
                     *prev.next() = Some(right_sibling.clone());
+                } else {
+                    self.first_leaf = right_sibling.clone();
                 }
                 *right_sibling.prev() = prev;
             },
@@ -389,8 +452,8 @@ impl SampleTree {
                 None => {
                     // `current` is the root node, which is permitted to be below min_items
                     if current.edges().len() == 1 {
-                        // self.root = current.edges().pop().unwrap().into();
-                        // self.height -= 1;
+                        self.root = current.edges().pop().unwrap().into();
+                        self.height -= 1;
                     }
                     break;
                 }
@@ -435,13 +498,15 @@ impl SampleTree {
                 Case::BalanceFromLeft => {
                     // pop from end of left, insert at 0 in current
                     let left_sibling = left_sibling.unwrap();
-                    current.keys().insert(0, left_sibling.keys().pop().unwrap());
+                    left_sibling.keys().pop().unwrap();
+                    current.keys().insert(0, left_sibling.largest_key_in_subtree());
                     current.edges().insert(0, left_sibling.edges().pop().unwrap());
                     parent.keys()[i - 1] = *left_sibling.keys().last().unwrap();
                     break
                 },
                 Case::MergeWithLeft => {
                     let left_sibling = left_sibling.unwrap();
+                    left_sibling.keys().push(left_sibling.largest_key_in_subtree());
                     left_sibling.keys().extend(current.keys().drain(..));
                     left_sibling.edges().extend(current.edges().drain(..));
                     // remove the key associated with left_sibling, since it is now the last node
@@ -451,34 +516,40 @@ impl SampleTree {
                 Case::BalanceFromRight => {
                     // remove at 0 from right, push to end of current
                     let right_sibling = right_sibling.unwrap();
-                    current.keys().push(right_sibling.keys().remove(0));
+                    right_sibling.keys().remove(0);
+                    current.keys().push(current.largest_key_in_subtree());
                     current.edges().push(right_sibling.edges().remove(0));
                     parent.keys()[i] = *current.keys().last().unwrap();
                     break;
                 },
                 Case::MergeWithRight => {
                     let right_sibling = right_sibling.unwrap();
+                    current.keys().push(current.largest_key_in_subtree());
                     current.keys().extend(right_sibling.keys().drain(..));
                     current.edges().extend(right_sibling.edges().drain(..));
-                    std::mem::swap(&mut current.keys(), &mut right_sibling.keys());
-                    std::mem::swap(&mut current.edges(), &mut right_sibling.edges());
+                    std::mem::swap(&mut *current.keys(), &mut *right_sibling.keys());
+                    std::mem::swap(&mut *current.edges(), &mut *right_sibling.edges());
                     parent.keys().remove(i);
                     parent.edges().remove(i);
                 },
                 Case::MergeThree => {
                     // split current's items between left and right (and remove current from parent)
                     let left_sibling = left_sibling.unwrap();
+                    left_sibling.keys().push(left_sibling.largest_key_in_subtree());
                     let right_sibling = right_sibling.unwrap();
+                    current.keys().push(current.largest_key_in_subtree());
                     let current_len = current.keys().len();
                     let mid = std::cmp::min(max_items - left_sibling.keys().len(), current_len / 2);
                     let mut rem_keys = current.keys().split_off(mid);
-                    let mut rem_values = current.edges().split_off(mid);
+                    let mut rem_edges = current.edges().split_off(mid);
                     left_sibling.keys().extend(current.keys().drain(..));
+                    left_sibling.keys().pop();
                     left_sibling.edges().extend(current.edges().drain(..));
-                    rem_keys.extend(right_sibling.keys().drain(..));
-                    rem_values.extend(right_sibling.edges().drain(..));
-                    *right_sibling.keys() = rem_keys;
-                    *right_sibling.edges() = rem_values;
+                    std::mem::swap(&mut rem_keys, &mut *right_sibling.keys());
+                    std::mem::swap(&mut rem_edges, &mut *right_sibling.edges());
+                    right_sibling.keys().push(right_sibling.largest_key_in_subtree());
+                    right_sibling.keys().extend(rem_keys);
+                    right_sibling.edges().extend(rem_edges);
                     parent.keys()[i - 1] = *left_sibling.keys().last().unwrap();
                     parent.keys().remove(i);
                     parent.edges().remove(i);
@@ -593,6 +664,18 @@ impl InternalNode {
 
     pub fn edges(&self) -> RefMut<'_, Vec<EitherNode>> {
         self.edges.borrow_mut()
+    }
+
+    pub fn largest_key_in_subtree(&self) -> u64 {
+        let mut last_edge = self.edges().last().unwrap().clone();
+        loop {
+            match last_edge {
+                EitherNode::Internal(internal) => {
+                    last_edge = internal.edges().last().unwrap().clone();
+                },
+                EitherNode::Leaf(leaf) => return *leaf.keys().last().unwrap(),
+            }
+        }
     }
 }
 

@@ -1,0 +1,147 @@
+2026-07-30
+==========
+
+I fixed a bug causing the panic I documented yesterday, then tried the demo with more elements; once the tree got deeper, I found a flaw in the current `remove()` algorithm. currently each time we merge internal nodes, we permanently "lose" a key; the issue is the last edge node never had a key to begin with, so when we naively merge the nodes, the number of keys is 2 less than the number of edges.
+
+we could either traverse down the tree to reach the leaf node, so we can find the key to add after that edge, OR we could modify the design so that internal nodes have that extra, redundant key for the last edge. traversing the tree isn't that bad, since it only scales with the height of the tree, which is O(log(n)). including that extra isn't that bad either, since for large orders (which our blocktree implementation will have), a single additional key would take up hardly any space on a full node. however, it would require rewriting our algorithm for `insert()`. actually, it would greatly complicate it, since we would have to bubble up changes to the last leaf in an edge further up the height of the tree.
+
+so actually, we should just traverse down the tree to resolve the key for the last edge, within `remove()`. if we modified the design of the tree, so internal nodes had this extra key slot for the last edge, we would have to modify `insert()` and still have to traverse up the tree to update this key. so we would be using more space, AND still need traverse the tree upwards on insertion, so there's no upside to including an extra key slot.
+
+hmm, now that I think about it, instead of traversing down the tree to find the leaf's last key, couldn't we check the parent node, what key they have for our node? that would fail if we're the last edge of our parent, or when the leaf is the last leaf in the tree. so traversing down is the best method.
+
+-----
+
+I bumped up the number of elements from 128 to 1024 (still order 10), and now we're getting a panic at line 591:
+  "attempt to subtract with overflow"
+  `let mid = std::cmp::min(max_items - left_sibling.keys().len(), current_len / 2);`
+while handling `Case::MergeThree` for internal nodes.
+
+ah... there's an internal node (#127) with 10 keys and 9 edges... that's not right.
+
+before removing key 230, node #127 has 8 keys and 8 edges;
+
+  tree: order 10, height 3, len 857
+  (height 2)
+      #127 internal: keys 8, edges 8
+          keys[36, 68, 97, 100, 136, 160, 180, 200]
+          edges[185, 86, 163, 23, 82, 69, 103, 44]
+  ### removing 230...
+  tree: order 10, height 3, len 856
+  (height 2)
+      #127 internal: keys 10, edges 9
+          keys[36, 68, 97, 100, 136, 160, 180, 200, 200, 228]
+          edges[185, 86, 163, 23, 82, 69, 103, 44, 114]
+
+so, it looks like the key 200 is being duplicated for some reason...
+
+after removing key 187, goes from keys,edges: 6,7 to 9,9...
+
+  tree: order 10, height 3, len 889
+  (height 2)
+      #127 internal: keys 6, edges 7
+          keys[36, 68, 97, 100, 136, 160]
+          edges[185, 86, 163, 23, 82, 69, 103]
+  ### removing 187...
+  tree: order 10, height 3, len 888
+  (height 2)
+      #127 internal: keys 9, edges 9
+          keys[36, 68, 97, 100, 136, 160, 180, 195, 200]
+          edges[185, 86, 163, 23, 82, 69, 103, 121, 44]
+
+ok, the issue was I needed to add this line near 595:
+  `left_sibling.keys().pop();`
+while handling `Case::MergeThree` for internal nodes.
+
+-----
+
+however, there's a couple of bugs still; we construct a tree with 1024 elements, then remove all keys where `key % 4 != 0`. however, the tree's `len` field reports 302, and `iter()` return 295 items... where as both should be 256 items.
+
+the first failure to remove an item was key 90; the containing internal node is invalid, note the repeated key 97.
+
+    #56 internal: keys 9, edges 10
+      keys[36, 68, 97, 97, 104, 111, 119, 128, 133]
+      edges[185, 86, 163, 23, 3, 167, 82, 54, 89, 149]
+
+looking closer at internal node #56:
+
+  tree: order 10, height 3, len 968
+  (height 2)
+      #56 internal: keys 5, edges 6
+          keys[104, 111, 119, 128, 133]
+          edges[3, 167, 82, 54, 89, 149]
+  ### removing 75...
+  tree: order 10, height 3, len 967
+  (height 2)
+      #56 internal: keys 10, edges 11
+          keys[36, 76, 83, 97, 97, 104, 111, 119, 128, 133]
+          edges[185, 86, 83, 163, 23, 3, 167, 82, 54, 89, 149]
+
+
+when removing key 75, internal node #124 is current in Case::MargeWithRight with node #56, resulting in the repeated key 97...
+
+  (height 2)
+      #124 internal: keys 5, edges 6
+          keys[36, 68, 78, 83, 97]
+          edges[185, 86, 136, 83, 163, 23]
+      #56 internal: keys 5, edges 6
+          keys[104, 111, 119, 128, 133]
+          edges[3, 167, 82, 54, 89, 149]
+
+the logic for appending the last edge's key in Case::MergeWithRight looks correct, maybe the leaf nodes are corrupted? let's look at nodes #163 and #23:
+
+      #163 leaf: keys 6, values 6
+          keys[84, 85, 86, 87, 88, 89]
+          values[101, 92, 91, 104, 102, 86]
+      #23 leaf: keys 8, values 8
+          keys[90, 91, 92, 93, 94, 95, 96, 97]
+          values[109, 90, 111, 100, 83, 110, 103, 99]
+
+hmm, so node #124 has key 97 for edge #163, when the key should have bee 89. let's look at node #124 and see where this corrupt key came from.
+
+  tree: order 10, height 3, len 972
+  (height 2)
+      #124 internal: keys 5, edges 6
+          keys[36, 60, 72, 78, 83]
+          edges[185, 86, 9, 136, 83, 163]
+  ### removing 70...
+  tree: order 10, height 3, len 971
+  (height 2)
+      #124 internal: keys 5, edges 6
+          keys[36, 68, 78, 83, 97]
+          edges[185, 86, 136, 83, 163, 23]
+
+when edge #23 gets added to #124 after removing key 70, we're pushing a key, and we incorrectly computed the key for #23 instead of #163.
+
+interesting, the bug appears in Case::BalanceFromRight; during removal of key 70, node #124 has less than min_items, so right_sibling is #24, and edge #23 is move to the end of #124.
+
+the bug is on line 545:
+  `current.keys().push(right_sibling.keys().remove(0));`
+we do need to remove the key at index 0 from right_sibling, but we should be pushing the key for current's last edge, not the key for the node at index 0 in right_sibling.
+
+-----
+
+I've corrected a number of bugs with how we handle merging/balancing internal nodes (the addition of `InternalNode::largest_key_in_subtree()`), but we're still encountering failures, and I can see several spots where the tree is corrupted; for example, it currently fails to remove key 197. not to mention that node #143 has a repeat of key 219.
+
+  (height 1)
+      #176 internal: keys 5, edges 6
+          keys[195, 256, 290, 321, 371]
+          edges[127, 143, 52, 175, 41, 102]
+  (height 2)
+      #127 internal: keys 6, edges 7
+          keys[36, 68, 100, 136, 160, 188]
+          edges[185, 86, 163, 82, 69, 103, 44]
+      #143 internal: keys 9, edges 9
+          keys[206, 213, 219, 219, 225, 232, 238, 243, 249]
+          edges[182, 31, 114, 50, 142, 81, 135, 18, 158]
+  (height 3)
+      #103 leaf: keys 7, values 7
+          keys[164, 168, 172, 176, 180, 184, 188]
+          values[100, 104, 103, 110, 108, 95, 110]
+      #44 leaf: keys 6, values 6
+          keys[192, 196, 197, 198, 199, 200]
+          values[89, 91, 82, 95, 92, 91]
+      #182 leaf: keys 6, values 6
+          keys[201, 202, 203, 204, 205, 206]
+          values[109, 92, 98, 100, 106, 98]
+
+but I'm going to continue debugging this later, I've had enough for today.

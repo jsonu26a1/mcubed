@@ -1,7 +1,7 @@
 use blocktree::sampletree::{SampleTree, debug_print_tree};
 
 fn main() {
-    demo01();
+    demo04();
 }
 
 fn demo01() {
@@ -79,6 +79,86 @@ fn demo03_array(i: usize) {
     println!("------ final tree...");
     // debug_print_tree(&tree, .., None);
     println!("{data:?}");
+}
+
+fn demo04() {
+    let mut prng = Prng::new();
+    let mut tree = SampleTree::new(10);
+    let m = 1024;
+    for _ in 0..100000 {
+        let i = (prng.next() % m) as u64;
+        tree.update_or_insert(i, |v| *v += 1, || 1);
+    }
+    let inspect_key = 197;
+    for i in 0..m {
+        // if i > inspect_key + 1 { panic!(); }
+        // if i >= inspect_key {
+        //     debug_print_tree(&tree, .., None);
+        //     // panic!();
+        // }
+        if i % 4 != 0 {
+            debug_print_tree(&tree, ..tree.height, Some(127));
+            print!("### removing {i}...\n");
+            match tree.remove(i) {
+                Some(_) => (),
+                None => {
+                    debug_print_tree(&tree, .., None);
+                    print!("unable to remove key {i}...\n");
+                    panic!();
+                }
+            }
+        }
+    }
+    debug_print_tree(&tree, .., None);
+    println!("{:?}", tree.iter().into_iter().map(|p| p.0).collect::<Vec<_>>());
+}
+
+fn demo04_02() {
+    let mut prng = Prng::new();
+    let mut tree = SampleTree::new(10);
+    let m = 1024;
+    for _ in 0..100000 {
+        let i = (prng.next() % m) as u64;
+        tree.update_or_insert(i, |v| *v += 1, || 1);
+    }
+    for i in 0..m {
+        // if i > 53 { panic!(); }
+        if i % 4 != 0 {
+            if i >= 187 {
+                debug_print_tree(&tree, ..=3, Some(176));
+                print!("### removing {i}...\n");
+                // panic!();
+            }
+            if i > 189 { panic!(); }
+            tree.remove(i);
+        }
+    }
+    debug_print_tree(&tree, .., None);
+    println!("{:?}", tree.iter().into_iter().map(|p| p.0).collect::<Vec<_>>());
+}
+
+fn demo05() {
+    let mut prng = Prng::new();
+    let mut tree = SampleTree::new(10);
+    let m = 128;
+    for _ in 0..1000 {
+        let i = (prng.next() % m) as u64;
+        tree.update_or_insert(i, |v| *v += 1, || 1);
+    }
+    for i in 0..m {
+        if i % 4 != 0 {
+            tree.remove(i);
+        }
+    }
+    println!("iter;\t\t{:?}", tree.iter().into_iter().map(|p| p.0).collect::<Vec<_>>());
+    let out = tree.iter_range(16..=22).into_iter().map(|p| p.0).collect::<Vec<_>>();
+    println!("iter_range;\t{out:?}");
+    // for i in 0..m {
+    //     for j in i+1..i+3 {
+    //         let out = tree.iter_range(i..j).into_iter().map(|p| p.0).collect::<Vec<_>>();
+    //         println!("iter_range({i}..{j}) -> {out:?}");
+    //     }
+    // }
 }
 
 struct Prng {
