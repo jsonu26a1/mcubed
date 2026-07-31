@@ -1,0 +1,16 @@
+
+
+
+parent:
+  keys:  0, 1, 2
+  edges: 0, 1, 2, 3
+            L  R
+
+i = 1
+
+if right_into_left {
+  parent:
+    keys:  0, 2
+    edges: 0, 2, 3
+              R
+}
