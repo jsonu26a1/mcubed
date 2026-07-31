@@ -89,15 +89,15 @@ fn demo04() {
         let i = (prng.next() % m) as u64;
         tree.update_or_insert(i, |v| *v += 1, || 1);
     }
-    let inspect_key = 197;
+    let inspect_key = 187;
     for i in 0..m {
         // if i > inspect_key + 1 { panic!(); }
         // if i >= inspect_key {
-        //     debug_print_tree(&tree, .., None);
+        //     debug_print_tree(&tree, .., Some(176));
         //     // panic!();
         // }
         if i % 4 != 0 {
-            debug_print_tree(&tree, ..tree.height, Some(127));
+            // debug_print_tree(&tree, ..tree.height, Some(143));
             print!("### removing {i}...\n");
             match tree.remove(i) {
                 Some(_) => (),

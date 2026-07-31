@@ -145,3 +145,42 @@ I've corrected a number of bugs with how we handle merging/balancing internal no
           values[109, 92, 98, 100, 106, 98]
 
 but I'm going to continue debugging this later, I've had enough for today.
+
+-----
+
+it's still today, I'm still at it. I was looking thru the code and noticed some things that "looked wrong"; managed to get the `remove()` demo to continue a bit further, but failed at key 219 now;
+
+I'm narrowing down the issue; looks like a bug within Case::MergeThree:
+
+  (height 2)
+    #127 internal: keys 5, edges 6
+        keys[36, 68, 100, 136, 160]
+        edges[185, 86, 163, 82, 69, 103]
+    #24 internal: keys 5, edges 6
+        keys[190, 195, 200, 206, 213]
+        edges[7, 121, 44, 182, 31, 114]
+    #143 internal: keys 5, edges 6
+        keys[225, 232, 238, 243, 249]
+        edges[50, 142, 81, 135, 18, 158]
+
+then key 187 is removed:
+
+(height 2)
+    #127 internal: keys 7, edges 8
+        keys[36, 68, 100, 136, 160, 180, 195]
+        edges[185, 86, 163, 82, 69, 103, 121, 44]
+    #143 internal: keys 9, edges 9
+        keys[206, 213, 219, 219, 225, 232, 238, 243, 249]
+        edges[182, 31, 114, 50, 142, 81, 135, 18, 158]
+
+the key 219 is repeated erroneously; there should be 8 keys, not 9...
+
+I think I found the issue; line 548:
+  `current.keys().push(current.largest_key_in_subtree());`
+and line 558:
+  `right_sibling.keys().push(right_sibling.largest_key_in_subtree());`
+that's where we're adding the key twice.
+
+finally! after fixing that, the demo completes successfully.
+
+there might still be bugs the demo doesn't catch, but this is good enough for now.

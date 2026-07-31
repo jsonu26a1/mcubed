@@ -498,10 +498,10 @@ impl SampleTree {
                 Case::BalanceFromLeft => {
                     // pop from end of left, insert at 0 in current
                     let left_sibling = left_sibling.unwrap();
-                    left_sibling.keys().pop().unwrap();
+                    let left_key = left_sibling.keys().pop().unwrap();
                     current.keys().insert(0, left_sibling.largest_key_in_subtree());
                     current.edges().insert(0, left_sibling.edges().pop().unwrap());
-                    parent.keys()[i - 1] = *left_sibling.keys().last().unwrap();
+                    parent.keys()[i - 1] = left_key;
                     break
                 },
                 Case::MergeWithLeft => {
@@ -516,10 +516,10 @@ impl SampleTree {
                 Case::BalanceFromRight => {
                     // remove at 0 from right, push to end of current
                     let right_sibling = right_sibling.unwrap();
-                    right_sibling.keys().remove(0);
+                    let right_key = right_sibling.keys().remove(0);
                     current.keys().push(current.largest_key_in_subtree());
                     current.edges().push(right_sibling.edges().remove(0));
-                    parent.keys()[i] = *current.keys().last().unwrap();
+                    parent.keys()[i] = right_key;
                     break;
                 },
                 Case::MergeWithRight => {
@@ -543,14 +543,13 @@ impl SampleTree {
                     let mut rem_keys = current.keys().split_off(mid);
                     let mut rem_edges = current.edges().split_off(mid);
                     left_sibling.keys().extend(current.keys().drain(..));
-                    left_sibling.keys().pop();
+                    let left_key = left_sibling.keys().pop().unwrap();
                     left_sibling.edges().extend(current.edges().drain(..));
                     std::mem::swap(&mut rem_keys, &mut *right_sibling.keys());
                     std::mem::swap(&mut rem_edges, &mut *right_sibling.edges());
-                    right_sibling.keys().push(right_sibling.largest_key_in_subtree());
                     right_sibling.keys().extend(rem_keys);
                     right_sibling.edges().extend(rem_edges);
-                    parent.keys()[i - 1] = *left_sibling.keys().last().unwrap();
+                    parent.keys()[i - 1] = left_key;
                     parent.keys().remove(i);
                     parent.edges().remove(i);
                 },
