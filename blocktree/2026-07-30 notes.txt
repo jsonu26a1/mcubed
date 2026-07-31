@@ -184,3 +184,78 @@ that's where we're adding the key twice.
 finally! after fixing that, the demo completes successfully.
 
 there might still be bugs the demo doesn't catch, but this is good enough for now.
+
+-----
+
+I created demo06(), which uses the pseudo-random number generator to pick which keys to remove, instead of removing the keys in order. I found and fixed a bug within Case::MergeThree; I had the line:
+  `left_sibling.keys().push(left_sibling.largest_key_in_subtree());`
+before the line:
+  `let mid = std::cmp::min(max_items - left_sibling.keys().len(), current_len / 2);`
+which caused overflow during subtraction; so I moved the push() call to be after `mid` is computed.
+
+there was another panic tho, another overflow during subtraction, on line 338:
+  `let left_available = max_items - left_len;`
+leaf node #7 has 11 keys and values. this state occurs when removing key 314:
+
+oops, no, key 168; before removing 168:
+
+(height 2)
+    #55 leaf: keys 6, values 6
+        keys[155, 160, 161, 163, 164, 166]
+        values[89, 89, 92, 99, 100, 96]
+    #166 leaf: keys 5, values 5
+        keys[168, 169, 171, 172, 175]
+        values[104, 103, 114, 103, 110]
+    #7 leaf: keys 9, values 9
+        keys[176, 178, 181, 182, 183, 184, 185, 187, 188]
+        values[110, 103, 105, 95, 98, 95, 75, 99, 110]
+
+after removing 168:
+
+(height 2)
+    #55 leaf: keys 8, values 8
+        keys[155, 160, 161, 163, 164, 166, 169, 171]
+        values[89, 89, 92, 99, 100, 96, 103, 114]
+    #7 leaf: keys 11, values 11
+        keys[172, 175, 176, 178, 181, 182, 183, 184, 185, 187, 188]
+        values[103, 110, 110, 103, 105, 95, 98, 95, 75, 99, 110]
+
+so this bug occurs in the logic for Case::MergeThree, but when merging leaf nodes, not internal node. so far, all the bugs I've encountered have been when handling the `Case` variants for internal nodes.
+
+the issue comes with how `mid` is being computed, line 426:
+  `let mid = std::cmp::min(max_items - left_sibling.keys().len(), leaf_len / 2);`
+the left and right siblings are #55 and #7; #55 len = 6; leaf_len = 4, #7 len = 9.
+
+the expression to compute mid looks like:
+  `min(10 - 6, 4 / 2)` -> `min(4, 2)` -> `2`
+
+so it looks like the issue is that we're never taking into account the available space on the right sibling... the right sibling has 1 slot available (10 - 9);
+
+in order for the correct outcome (that right sibling only gets 1 item prepended to it), mid would need to be `3`.
+
+perhaps we should compute mid like this?
+  `let mid = std::cmp::max(std::cmp::min(max_items - left_sibling.keys().len(), leaf_len / 2), leaf_len - max_items + right_sibling.keys().len()));`
+
+evaluating:
+  `max(min(10 - 6, 4 / 2), 4 - 10 + 9)` -> `max(min(4, 2), 3)` -> `max(2, 3)` -> `3`
+
+would this expression work when lengths are left: 9, leaf: 4, right: 6?
+  `max(min(10 - 1, 4 / 2), 4 - 10 + 6)` -> `max(min(9, 2), 0)` -> `max(2, 0)` -> `2`
+
+yes, this should work.
+
+-----
+
+so I built a better fuzzer... tester... thing. it inserts and removes keys more efficiently, and also does multiple runs with different PRNG seeds, and different tree orders (although, it current hasn't made it past 6 runs on order 6).
+
+I'm seeing a panic on line 472:
+  `let right_available = max_items - right_len;`
+
+So there's an internal node with more than max_items. I believe this bug has to do with Case::MergeThree; currently we're computing mid using left/right node.keys(), when maybe we should be using node.edges()?
+
+I don't think that's right, it caused a new panic:
+  "`at` split index (is 3) should be <= len (is 2)"
+at line 548:
+  `let mut rem_keys = current.keys().split_off(mid);`
+
+I'll have to dig into this bug more tomorrow.

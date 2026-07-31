@@ -423,7 +423,10 @@ impl SampleTree {
                 let left_sibling = left_sibling.unwrap();
                 let right_sibling = right_sibling.unwrap();
                 let leaf_len = leaf.keys().len();
-                let mid = std::cmp::min(max_items - left_sibling.keys().len(), leaf_len / 2);
+                // this doesn't account for right_sibling's len() (available slots)
+                // let mid = std::cmp::min(max_items - left_sibling.keys().len(), leaf_len / 2);
+                let mid_left_bias = std::cmp::min(max_items - left_sibling.keys().len(), leaf_len / 2);
+                let mid = std::cmp::max(mid_left_bias, (leaf_len + right_sibling.keys().len()).saturating_sub(max_items));
                 let mut rem_keys = leaf.keys().split_off(mid);
                 let mut rem_values = leaf.values().split_off(mid);
                 left_sibling.keys().extend(leaf.keys().drain(..));
@@ -535,13 +538,16 @@ impl SampleTree {
                 Case::MergeThree => {
                     // split current's items between left and right (and remove current from parent)
                     let left_sibling = left_sibling.unwrap();
-                    left_sibling.keys().push(left_sibling.largest_key_in_subtree());
                     let right_sibling = right_sibling.unwrap();
                     current.keys().push(current.largest_key_in_subtree());
                     let current_len = current.keys().len();
-                    let mid = std::cmp::min(max_items - left_sibling.keys().len(), current_len / 2);
+                    // this doesn't account for right_sibling's len() (available slots)
+                    // let mid = std::cmp::min(max_items - left_sibling.keys().len(), current_len / 2);
+                    let mid_left_bias = std::cmp::min(max_items - left_sibling.keys().len(), current_len / 2);
+                    let mid = std::cmp::max(mid_left_bias, (current_len + right_sibling.keys().len()).saturating_sub(max_items));
                     let mut rem_keys = current.keys().split_off(mid);
                     let mut rem_edges = current.edges().split_off(mid);
+                    left_sibling.keys().push(left_sibling.largest_key_in_subtree());
                     left_sibling.keys().extend(current.keys().drain(..));
                     let left_key = left_sibling.keys().pop().unwrap();
                     left_sibling.edges().extend(current.edges().drain(..));
