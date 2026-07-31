@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use blocktree::sampletree::{SampleTree, debug_print_tree};
 
 fn main() {
@@ -89,7 +91,7 @@ fn demo04() {
         let i = (prng.next() % m) as u64;
         tree.update_or_insert(i, |v| *v += 1, || 1);
     }
-    let inspect_key = 187;
+    // let inspect_key = 187;
     for i in 0..m {
         // if i > inspect_key + 1 { panic!(); }
         // if i >= inspect_key {
@@ -196,45 +198,76 @@ fn demo06() {
 }
 
 fn demo07() {
-    let mut prng = Prng::new();
-    let mut keys = vec![];// (vec![]).extend((0..1024).iter());
-    for i in 0..1024 {
+    let mut keys = vec![];
+    for i in 0..1024*4 {
         keys.push(i);
     }
+
+    let task_override: Option<([u32; 4], u32)> = Some((
+        [117864738, 2709168086, 171794670, 3210898771],
+        6,
+    ));
+    let task_override = None;
+    if let Some((seed, order)) = task_override {
+        let r = run_demo07_task(seed, order, &keys, Some(|insert, key, tree: &SampleTree| {
+            let inspect_key: Option<(u64, u64)> = None;
+            // let inspect_key = Some((496, 663));
+
+            // let inspect_node = None;
+            let inspect_node = Some(161);
+
+            if insert {
+                return;
+            }
+            if let Some(inspect_key) = inspect_key {
+                if key != inspect_key.0 && key != inspect_key.1 {
+                    return;
+                }
+                println!("### tree before key {key} removed:");
+                debug_print_tree(&tree, .., inspect_node);
+            } else {
+                println!("before key {key} removed...");
+                debug_print_tree(&tree, 1..tree.height, inspect_node);
+            }
+        }));
+        if let Err(msg) = r {
+            println!("### TASK ERROR; order: {order}, seed: {seed:?}\n{msg}");
+        }
+    } else {
+        demo07_runner(&keys);
+    }
+}
+
+fn demo07_runner(keys: &Vec<u64>) {
+    let mut prng = Prng::new();
     let mut run_count = 0;
-    for order in 6..20 {
-        for _ in 0..100 {
-            let mut tree = SampleTree::new(order);
+    for order in 6..40 {
+        for _ in 0..50 {
             let seed = [prng.next() as u32, prng.next() as u32, prng.next() as u32, prng.next() as u32];
-            // let r = match std::panic::catch_unwind(|| ) {
-            //     Ok(r) => r,
-            //     Err(e) => {
-            //         println!("### TASK PANIC; order: {order}, seed: {seed:?}\n");
-            //         std::panic::resume_unwind(e);
-            //     }
-            // };
             let default_hook = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
                 println!("### TASK PANIC; run: {run_count}, order: {order}, seed: {seed:?}\n");
                 default_hook(info);
             }));
-            if let Err(msg) = run_demo07_task(seed, tree, keys.clone()) {
+            let fb: Option<&fn(_, _, &_)> = None;
+            if let Err(msg) = run_demo07_task(seed, order, keys, fb) {
                 println!("### TASK ERROR; run: {run_count}, order: {order}, seed: {seed:?}\n{msg}");
             }
-            std::panic::take_hook();
+            let _ = std::panic::take_hook();
             run_count += 1;
         }
     }
     println!("demo07 done.");
 }
 
-fn run_demo07_task(seed: [u32; 4], mut tree: SampleTree, mut keys: Vec<u64>) -> Result<(), String> {
+fn run_demo07_task(seed: [u32; 4], order: u32, keys_original: &Vec<u64>, fb: Option<impl Fn(bool, u64, &SampleTree)>) -> Result<(), String> {
     let mut prng = Prng::new();
     prng.a = seed[0];
     prng.b = seed[1];
     prng.c = seed[2];
     prng.d = seed[3];
-    let mut keys2 = keys.clone();
+    let mut tree = SampleTree::new(order);
+    let mut keys = keys_original.clone();
     let mut tracked_len = 0;
     while keys.len() > 0 {
         let n = prng.next();
@@ -242,7 +275,11 @@ fn run_demo07_task(seed: [u32; 4], mut tree: SampleTree, mut keys: Vec<u64>) -> 
         let k = keys[i];
         keys[i] = keys[keys.len() - 1];
         keys.pop();
-        if let Some(v) = tree.insert(k, n) {
+        if let Some(ref fb) = fb {
+            // feedback callback
+            fb(true, k, &tree);
+        }
+        if let Some(v) = tree.insert(k, 0) {
             return Err(format!("### attempted to insert(key {k}, n {n}), but found existing value {v}"));
         }
         tracked_len += 1;
@@ -250,12 +287,17 @@ fn run_demo07_task(seed: [u32; 4], mut tree: SampleTree, mut keys: Vec<u64>) -> 
             return Err(format!("### [insert] tracked_len {tracked_len} doesn't match tree.len {}", tree.len));
         }
     }
+    let mut keys2 = keys_original.clone();
     while keys2.len() > 0 {
         let n = prng.next();
         let i = n as usize % keys2.len();
         let k = keys2[i];
         keys2[i] = keys2[keys2.len() - 1];
         keys2.pop();
+        if let Some(ref fb) = fb {
+            // feedback callback
+            fb(false, k, &tree);
+        }
         if let None = tree.remove(k) {
             return Err(format!("### failed to remove(key {k})"));
         }

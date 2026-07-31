@@ -300,8 +300,10 @@ impl SampleTree {
         let max_items = self.order as usize;
 
         if leaf.keys().len() >= min_items {
+            // if index of removed key is at the end of leaf
             if i == leaf.keys().len() {
                 for (parent, i) in parents {
+                    // if index of child edge in parent is not at the end
                     if i < parent.keys().len() {
                         parent.keys()[i] = *leaf.keys().last().unwrap();
                         // we can stop once we've found the key to update
@@ -447,7 +449,7 @@ impl SampleTree {
         let mut current;
         loop {
             current = parent;
-            if current.keys().len() >= min_items {
+            if current.edges().len() >= min_items {
                 break;
             }
             (parent, i) = match parents.next() {
@@ -465,9 +467,9 @@ impl SampleTree {
             let right_sibling = parent.edges().get(i + 1).map(|either| either.clone().internal());
             let case: Case;
             if let Some(ref left_sibling) = left_sibling && let Some(ref right_sibling) = right_sibling {
-                let current_len = current.keys().len();
-                let left_len = left_sibling.keys().len();
-                let right_len = right_sibling.keys().len();
+                let current_len = current.edges().len();
+                let left_len = left_sibling.edges().len();
+                let right_len = right_sibling.edges().len();
                 let left_available = max_items - left_len;
                 let right_available = max_items - right_len;
                 if left_available + right_available < current_len {
@@ -480,13 +482,13 @@ impl SampleTree {
                     case = Case::MergeThree;
                 }
             } else if let Some(ref left_sibling) = left_sibling {
-                case = if left_sibling.keys().len() > min_items {
+                case = if left_sibling.edges().len() > min_items {
                     Case::BalanceFromLeft
                 } else {
                     Case::MergeWithLeft
                 };
             } else if let Some(ref right_sibling) = right_sibling {
-                case = if right_sibling.keys().len() > min_items {
+                case = if right_sibling.edges().len() > min_items {
                     Case::BalanceFromRight
                 } else {
                     Case::MergeWithRight
@@ -540,11 +542,11 @@ impl SampleTree {
                     let left_sibling = left_sibling.unwrap();
                     let right_sibling = right_sibling.unwrap();
                     current.keys().push(current.largest_key_in_subtree());
-                    let current_len = current.keys().len();
+                    let current_len = current.edges().len();
                     // this doesn't account for right_sibling's len() (available slots)
                     // let mid = std::cmp::min(max_items - left_sibling.keys().len(), current_len / 2);
-                    let mid_left_bias = std::cmp::min(max_items - left_sibling.keys().len(), current_len / 2);
-                    let mid = std::cmp::max(mid_left_bias, (current_len + right_sibling.keys().len()).saturating_sub(max_items));
+                    let mid_left_bias = std::cmp::min(max_items - left_sibling.edges().len(), current_len / 2);
+                    let mid = std::cmp::max(mid_left_bias, (current_len + right_sibling.edges().len()).saturating_sub(max_items));
                     let mut rem_keys = current.keys().split_off(mid);
                     let mut rem_edges = current.edges().split_off(mid);
                     left_sibling.keys().push(left_sibling.largest_key_in_subtree());
