@@ -1,7 +1,8 @@
 use std::collections::btree_map::{BTreeMap, Entry};
-use std::cell::RefCell;
+use std::cell::{RefCell, Ref, RefMut, Cell};
 use std::io::Result as IoResult;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
+use std::mem::size_of;
 
 use super::backend::IoBackend;
 use super::{ BlockIndex, BLOCK_INDEX_SIZE, BLOCK_SIZE };
@@ -36,14 +37,14 @@ impl BlockManager {
         Ok(manager)
     }
 
-    pub fn read_block(&self, index: BlockIndex) -> IoResult<Rc<[u8]>> {
+    pub fn read_block(&self, index: BlockIndex) -> IoResult<BlockBuffer> {
         let inner = &mut *self.inner.borrow_mut();
         match inner.cache.entry(index) {
             Entry::Vacant(ve) => {
                 let mut buffer = vec![];
                 buffer.resize(BLOCK_SIZE, 0);
                 inner.backend.read(index * BLOCK_SIZE as u64, &mut buffer)?;
-                let buffer: Rc<[u8]> = buffer.into();
+                let buffer = Rc::new(BlockBufferInner::new(buffer.into_boxed_slice(), index, Some(Rc::downgrade(&self.inner))));
                 ve.insert(buffer.clone());
                 Ok(buffer)
             },
@@ -53,9 +54,14 @@ impl BlockManager {
         }
     }
 
-    pub fn write_block(&self, index: BlockIndex, buffer: impl Into<Rc<[u8]>>) {
+    // pub fn write_block(&self, index: BlockIndex, buffer: impl Into<Rc<[u8]>>) {
+    //     let inner = &mut *self.inner.borrow_mut();
+    //     inner.cache.insert(index, BlockBuffer::new(buffer.into()));
+    //     inner.modified.push(index);
+    // }
+
+    fn mark_block_as_modified(&self, index: BlockIndex) {
         let inner = &mut *self.inner.borrow_mut();
-        inner.cache.insert(index, buffer.into());
         inner.modified.push(index);
     }
 
@@ -63,7 +69,8 @@ impl BlockManager {
         let inner = &mut *self.inner.borrow_mut();
         while let Some(index) = inner.modified.pop() {
             let buffer = inner.cache.get_mut(&index).unwrap();
-            inner.backend.write(index * BLOCK_SIZE as u64, &buffer)?;
+            buffer.manager.set(Some(Rc::downgrade(&self.inner)));
+            inner.backend.write(index * BLOCK_SIZE as u64, &*buffer.borrow())?;
         }
         Ok(())
     }
@@ -95,21 +102,12 @@ impl BlockManager {
 
 struct BlockManagerInner {
     backend: Box<dyn IoBackend>,
-    cache: BTreeMap<BlockIndex, Rc<[u8]>>,
+    cache: BTreeMap<BlockIndex, BlockBuffer>,
     modified: Vec<BlockIndex>,
     root_header: RootHeader,
 }
 
-pub struct BlockBuffer {
-    ptr: *mut u8,
-    len: usize,
-}
-
-impl BlockBuffer {
-    fn new(buffer: Vec<u8>) -> Self {
-        todo!();
-    }
-}
+type WeakBlockManager = Weak<RefCell<BlockManagerInner>>;
 
 struct RootHeader {
     blocks_used: BlockIndex,
@@ -128,27 +126,211 @@ impl RootHeader {
         }
     }
 
-    fn load(&mut self, buffer: &[u8]) {
+    fn load(&mut self, buffer: &BlockBuffer) {
+        let reader = buffer.reader();
         let mut offset = 0;
-        self.blocks_used = BlockIndex::from_be_bytes(buffer[offset..offset+BLOCK_INDEX_SIZE].try_into().unwrap());
-        offset += BLOCK_INDEX_SIZE;
-        self.blocks_total = BlockIndex::from_be_bytes(buffer[offset..offset+BLOCK_INDEX_SIZE].try_into().unwrap());
-        offset += BLOCK_INDEX_SIZE;
-        self.write_counter = u128::from_be_bytes(buffer[offset..offset+16].try_into().unwrap());
-        offset += 16;
-        self.free_blocks_tree = BlockIndex::from_be_bytes(buffer[offset..offset+BLOCK_INDEX_SIZE].try_into().unwrap());
-        offset += BLOCK_INDEX_SIZE;
+        self.blocks_used = reader.read_and(&mut offset);
+        self.blocks_total = reader.read_and(&mut offset);
+        self.write_counter = reader.read_and(&mut offset);
+        self.free_blocks_tree = reader.read_and(&mut offset);
     }
 
-    fn store(&mut self, buffer: &mut [u8]) {
+    fn store(&mut self, buffer: &BlockBuffer) {
+        let mut writer = buffer.writer();
         let mut offset = 0;
-        buffer[offset..offset+BLOCK_INDEX_SIZE].copy_from_slice(&self.blocks_used.to_be_bytes()[..]);
-        offset += BLOCK_INDEX_SIZE;
-        buffer[offset..offset+BLOCK_INDEX_SIZE].copy_from_slice(&self.blocks_total.to_be_bytes()[..]);
-        offset += BLOCK_INDEX_SIZE;
-        buffer[offset..offset+16].copy_from_slice(&self.write_counter.to_be_bytes()[..]);
-        offset += 16;
-        buffer[offset..offset+BLOCK_INDEX_SIZE].copy_from_slice(&self.free_blocks_tree.to_be_bytes()[..]);
-        offset += BLOCK_INDEX_SIZE;
+        writer.write_and(&mut offset, self.blocks_used);
+        writer.write_and(&mut offset, self.blocks_total);
+        writer.write_and(&mut offset, self.write_counter);
+        writer.write_and(&mut offset, self.free_blocks_tree);
+    }
+}
+
+/*
+a shared pointer that allows reading from and writing to a buffer
+
+this will probably change in the future, I had a few ideas I was messing around with, including
+Rc::make_mut() on write; and another that used a `*mut [u8]` ptr and only allowing copying bytes
+into and out of the buffer, and forbidding slices of the buffer. but I decided to go with this
+design for now just to be safe.
+
+NOTE: calling borrow_mut() marks this block as being modified, meaning it will be written
+out to the backend during commit_pending_writes().
+*/
+
+pub type BlockBuffer = Rc<BlockBufferInner>;
+
+pub struct BlockBufferInner {
+    buffer: RefCell<Box<[u8]>>,
+    index: BlockIndex,
+    manager: Cell<Option<WeakBlockManager>>,
+}
+
+impl BlockBufferInner {
+    pub fn new(buffer: Box<[u8]>, index: BlockIndex, manager: Option<WeakBlockManager>) -> Self {
+        Self {
+            buffer: RefCell::new(buffer),
+            index,
+            manager: Cell::new(manager),
+        }
+    }
+
+    pub fn borrow(&self) -> Ref<'_, [u8]> {
+        Ref::map(self.buffer.borrow(), |b| &**b)
+    }
+
+    pub fn borrow_mut(&self) -> RefMut<'_, [u8]> {
+        if let Some(inner) = self.manager.replace(None).map(|w| w.upgrade()).flatten() {
+            let manager = BlockManager { inner };
+            manager.mark_block_as_modified(self.index);
+        }
+        RefMut::map(self.buffer.borrow_mut(), |b| &mut **b)
+    }
+
+    pub fn reader(&self) -> BufferReader<'_> {
+        BufferReader(self.borrow())
+    }
+
+    pub fn writer(&self) -> BufferWriter<'_> {
+        BufferWriter(self.borrow_mut())
+    }
+}
+
+pub struct BufferReader<'a>(pub Ref<'a, [u8]>);
+
+impl<'a> BufferReader<'a> {
+    pub fn read<T: FromToBytes>(&self, offset: usize) -> T {
+        T::from_bytes(&self.0[offset..])
+    }
+
+    pub fn read_and<T: FromToBytes>(&self, offset: &mut usize) -> T {
+        let value = self.read(*offset);
+        *offset += size_of::<T>();
+        value
+    }
+}
+
+pub struct BufferWriter<'a>(pub RefMut<'a, [u8]>);
+
+impl<'a> BufferWriter<'a> {
+    pub fn write<T: FromToBytes>(&mut self, offset: usize, value: T) {
+        value.to_bytes(&mut self.0[offset..])
+    }
+
+    pub fn write_and<T: FromToBytes>(&mut self, offset: &mut usize, value: T) {
+        self.write(*offset, value);
+        *offset += size_of::<T>();
+    }
+}
+
+pub trait FromToBytes {
+    fn from_bytes(buffer: &[u8]) -> Self;
+    fn to_bytes(&self, buffer: &mut [u8]);
+}
+
+impl FromToBytes for u8 {
+    fn from_bytes(buffer: &[u8]) -> Self {
+        buffer[0]
+    }
+    fn to_bytes(&self, buffer: &mut [u8]) {
+        buffer[0] = *self;
+    }
+}
+
+impl FromToBytes for u16 {
+    fn from_bytes(buffer: &[u8]) -> Self {
+        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
+    }
+    fn to_bytes(&self, buffer: &mut [u8]) {
+        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
+    }
+}
+
+impl FromToBytes for u32 {
+    fn from_bytes(buffer: &[u8]) -> Self {
+        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
+    }
+    fn to_bytes(&self, buffer: &mut [u8]) {
+        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
+    }
+}
+
+impl FromToBytes for u64 {
+    fn from_bytes(buffer: &[u8]) -> Self {
+        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
+    }
+    fn to_bytes(&self, buffer: &mut [u8]) {
+        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
+    }
+}
+
+impl FromToBytes for u128 {
+    fn from_bytes(buffer: &[u8]) -> Self {
+        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
+    }
+    fn to_bytes(&self, buffer: &mut [u8]) {
+        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
+    }
+}
+
+impl FromToBytes for usize {
+    fn from_bytes(buffer: &[u8]) -> Self {
+        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
+    }
+    fn to_bytes(&self, buffer: &mut [u8]) {
+        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
+    }
+}
+
+impl FromToBytes for i8 {
+    fn from_bytes(buffer: &[u8]) -> Self {
+        buffer[0] as Self
+    }
+    fn to_bytes(&self, buffer: &mut [u8]) {
+        buffer[0] = *self as u8;
+    }
+}
+
+impl FromToBytes for i16 {
+    fn from_bytes(buffer: &[u8]) -> Self {
+        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
+    }
+    fn to_bytes(&self, buffer: &mut [u8]) {
+        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
+    }
+}
+
+impl FromToBytes for i32 {
+    fn from_bytes(buffer: &[u8]) -> Self {
+        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
+    }
+    fn to_bytes(&self, buffer: &mut [u8]) {
+        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
+    }
+}
+
+impl FromToBytes for i64 {
+    fn from_bytes(buffer: &[u8]) -> Self {
+        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
+    }
+    fn to_bytes(&self, buffer: &mut [u8]) {
+        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
+    }
+}
+
+impl FromToBytes for i128 {
+    fn from_bytes(buffer: &[u8]) -> Self {
+        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
+    }
+    fn to_bytes(&self, buffer: &mut [u8]) {
+        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
+    }
+}
+
+impl FromToBytes for isize {
+    fn from_bytes(buffer: &[u8]) -> Self {
+        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
+    }
+    fn to_bytes(&self, buffer: &mut [u8]) {
+        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
     }
 }

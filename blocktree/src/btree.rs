@@ -1,5 +1,5 @@
-use super::{ BlockIndex, BLOCK_SIZE };
-use super::manager::BlockManager;
+use super::manager::{BlockBuffer, BlockManager};
+use super::{BlockIndex, BLOCK_INDEX_SIZE, BLOCK_SIZE};
 
 // pub enum DataType {
 //     Inline(u32),
@@ -13,14 +13,10 @@ for now, BTree will only support u64 keys and values, just like SampleTree.
 the structs for Nodes will store a pointer to the buffer, and will have the logic for
 retrieving keys, edges, and values from the buffer.
 
-I'm not quite sure yet how to handle modifications. the BTree will need to track which
-nodes/blocks have been modified, and call BlockManager::write_block() after an operation is
-completed. although, this would mean that calling "insert()" on the btree several times,
-would require cloning the buffers of blocks for each operation (since they become shared
-Rc<[u8]> again after write_block(), and cannot be modified in place while in the cache...
-
-hmm, we may need to rethink the design of BlockManager's cache; what about something like
-Rc<Cell<[u8]>>? nope, cannot use Cell. I think I have another idea tho...
+with BlockBuffer, we can modify it, and BlockManager will automatically be aware that it's
+been modified. I also have an interface to easily read/write integers. I think this API
+will be good enough for implementing BTree, which serves as the core data structure within
+this file format.
 */
 
 pub struct BTree {
@@ -32,32 +28,34 @@ pub struct BTree {
     // value_type: DataType,
 }
 
-impl BTree {
-
-}
+impl BTree {}
 
 struct InternalNode {
     block: BlockIndex,
-    buffer: Rc<[u8]>,
+    buffer: BlockBuffer,
     offset: usize,
-    len: u64,
+    len: usize,
 }
 
+// these fields are encoded in the block buffer:
+// (len: u32, keys: [u64; len], edges: [BlockIndex; len])
 impl InternalNode {
     fn get_key(&self, index: usize) -> u64 {
-        todo!();
+        let offset = 4 + index * 8;
+        self.buffer.reader().read(offset)
     }
 
     fn get_edge(&self, index: usize) -> BlockIndex {
-        todo!();
+        let offset = 4 + self.len * 8 + index * BLOCK_INDEX_SIZE;
+        self.buffer.reader().read(offset)
     }
 }
 
 struct LeafNode {
     inblockdex: BlockIndex,
-    buffer: Rc<[u8]>,
+    buffer: BlockBuffer,
     offset: usize,
-    len: u64,
+    len: usize,
 }
 
 impl LeafNode {

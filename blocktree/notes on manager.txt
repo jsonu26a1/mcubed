@@ -1,0 +1,29 @@
+2026-07-31
+==========
+
+we want to expose a "handle" to a block, which the blocktree can read and write; but writes should not be forwarded directly to the IoBackend, instead they should be buffered until the "write transaction is committed", which is terminology of redb's design.
+
+as for caching read blocks, there's a trade off: if we cache blocks in memory for repeat reads, we don't have a good way of knowing when to free entries in the cache. when the block handle is dropped, it's possible that block could be read from again soon, and a handle might be held even tho no reads are being made. however, if we don't have any caching, all reads will require a syscall, but maybe that's not too bad.
+
+I think for now, the simplest option is to not have any caching...
+
+I really don't like the idea of the process holding onto blocks in memory for caching purposes; redb I think uses a "cache size limit" to start evicting entries from the cache, but that requires tuning to make it optimal. I feel like reading from the file system isn't that bad of a trade off. I don't see a problem with using the OS to handle caching file IO for us.
+
+hmmm, I just remembered, about redb, maybe reason it uses that caching strategy is because of it's ability to have a previous read transaction still be valid after a write transaction. a block might be cached for the prev read transaction, while the block in the file has been updated by the write transaction.
+
+we could offer an API to enable caching of blocks, for performance reasons. it would be similar to how writes are cached before being committed, except there would be no changes...
+
+
+
+2026-08-01
+==========
+
+I spent some time yesterday thinking about Rc<RefCell<T>> vs Arc<Mutex<T>> for the BlockManager. the Mutex is definitely slower than a RefCell, even if there's only one thread that can access it.
+
+one work around might be to use a special type, like `enum CheckedMut<T> { Local(RefCell<T>), Thread(Mutex<T>) }`, which would allow "upgrading" it from a RefCell to a Mutex. hmm, actually, that wouldn't exactly work; no, I don't think there's any way to make it work. it might work with a specialized custom type, that uses the same primitives that RefCell and Mutex use, but it still might not be sound.
+
+regardless, during this early stage in development, I'll just use Rc<RefCell<T>> rather than Arc<Mutex<T>>, since we aren't going to worry about threading at all right now.
+
+-----
+
+as for caching, let's just have a simple cache policy- we don't have a size limit, and the cache can be manually emptied. writes to blocks are written to the cache, and are tracked so they can be committed all at once at a later time.
