@@ -1,5 +1,6 @@
-use super::manager::{BlockBuffer, BlockManager};
-use super::{BlockIndex, BLOCK_INDEX_SIZE, BLOCK_SIZE};
+use std::mem::size_of;
+
+use super::{BlockIndex, BLOCK_INDEX_SIZE, BLOCK_SIZE, BlockManager, BlockBuffer};
 
 // pub enum DataType {
 //     Inline(u32),
@@ -40,14 +41,22 @@ struct InternalNode {
 // these fields are encoded in the block buffer:
 // (len: u32, keys: [u64; len], edges: [BlockIndex; len])
 impl InternalNode {
+    fn keys_start(&self) -> usize {
+        size_of::<u32>()
+    }
+
+    fn edges_start(&self) -> usize {
+        self.keys_start() + self.len * size_of::<u64>()
+    }
+
     fn get_key(&self, index: usize) -> u64 {
-        let offset = 4 + index * 8;
-        self.buffer.reader().read(offset)
+        let offset = self.keys_start();
+        self.buffer.reader().at(offset)
     }
 
     fn get_edge(&self, index: usize) -> BlockIndex {
-        let offset = 4 + self.len * 8 + index * BLOCK_INDEX_SIZE;
-        self.buffer.reader().read(offset)
+        let offset = self.edges_start() + index * BLOCK_INDEX_SIZE;
+        self.buffer.reader().at(offset)
     }
 }
 
