@@ -6,7 +6,7 @@ pub mod btree;
 pub mod block;
 
 pub use block::{BlockBuffer, BlockReader, BlockWriter};
-pub use manager::{BlockManager, WeakBlockManager, FromToBytes};
+pub use manager::{BlockManager, WeakBlockManager, FromBytes, ToBytes};
 pub use backend::IoBackend;
 
 pub type BlockIndex = u64;

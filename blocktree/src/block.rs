@@ -3,7 +3,7 @@ use std::mem::size_of;
 use std::ops::Deref;
 use std::rc::Rc;
 
-use super::{BlockIndex, BlockManager, WeakBlockManager, FromToBytes};
+use super::{BlockIndex, WeakBlockManager, FromBytes, ToBytes};
 
 #[derive(Clone)]
 pub struct BlockBuffer(Rc<BlockBufferInner>);
@@ -26,6 +26,10 @@ impl BlockBuffer {
             manager.mark_block_as_modified(self.0.index);
         }
         RefMut::map(self.0.buffer.borrow_mut(), |b| &mut **b)
+    }
+
+    pub fn index(&self) -> BlockIndex {
+        self.0.index
     }
 
     pub fn reader(&self) -> BlockReader<'_> {
@@ -56,11 +60,11 @@ struct BlockBufferInner {
 pub struct BlockReader<'a>(pub Ref<'a, [u8]>);
 
 impl<'a> BlockReader<'a> {
-    pub fn at<T: FromToBytes>(&self, offset: usize) -> T {
+    pub fn at<T: FromBytes>(&self, offset: usize) -> T {
         T::from_bytes(&self.0[offset..])
     }
 
-    pub fn at_and<T: FromToBytes>(&self, offset: &mut usize) -> T {
+    pub fn at_and<T: FromBytes>(&self, offset: &mut usize) -> T {
         let value = self.at(*offset);
         *offset += size_of::<T>();
         value
@@ -79,11 +83,11 @@ impl<'a> BlockReader<'a> {
 pub struct BlockWriter<'a>(pub RefMut<'a, [u8]>);
 
 impl<'a> BlockWriter<'a> {
-    pub fn at<T: FromToBytes>(&mut self, offset: usize, value: T) {
+    pub fn at<T: ToBytes>(&mut self, offset: usize, value: T) {
         value.to_bytes(&mut self.0[offset..]);
     }
 
-    pub fn at_and<T: FromToBytes>(&mut self, offset: &mut usize, value: T) {
+    pub fn at_and<T: ToBytes>(&mut self, offset: &mut usize, value: T) {
         self.at(*offset, value);
         *offset += size_of::<T>();
     }

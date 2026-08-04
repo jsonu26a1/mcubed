@@ -1,5 +1,5 @@
 use std::collections::btree_map::{BTreeMap, Entry};
-use std::cell::{RefCell, Ref, RefMut, Cell};
+use std::cell::RefCell;
 use std::io::Result as IoResult;
 use std::rc::{Rc, Weak};
 use std::mem::size_of;
@@ -7,7 +7,7 @@ use std::ops::Deref;
 
 use super::backend::IoBackend;
 use super::block::{BlockBuffer};
-use super::{BlockIndex, BLOCK_INDEX_SIZE, BLOCK_SIZE};
+use super::{BlockIndex, BLOCK_SIZE};
 
 pub struct BlockManager {
     inner: Rc<RefCell<BlockManagerInner>>,
@@ -148,115 +148,85 @@ impl RootHeader {
     }
 }
 
-pub trait FromToBytes {
+pub trait FromBytes {
     fn from_bytes(buffer: &[u8]) -> Self;
+}
+
+pub trait ToBytes {
     fn to_bytes(&self, buffer: &mut [u8]);
 }
 
-impl FromToBytes for u8 {
-    fn from_bytes(buffer: &[u8]) -> Self {
-        buffer[0]
-    }
+impl<T: ToBytes> ToBytes for &T {
     fn to_bytes(&self, buffer: &mut [u8]) {
-        buffer[0] = *self;
+        self.to_bytes(buffer);
     }
 }
 
-impl FromToBytes for u16 {
-    fn from_bytes(buffer: &[u8]) -> Self {
-        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
-    }
+impl<T: ToBytes> ToBytes for &[T] {
     fn to_bytes(&self, buffer: &mut [u8]) {
-        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
+        let mut offset = 0;
+        for t in *self {
+            t.to_bytes(&mut buffer[offset..]);
+            offset += size_of::<T>();
+        }
     }
 }
 
-impl FromToBytes for u32 {
-    fn from_bytes(buffer: &[u8]) -> Self {
-        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
-    }
-    fn to_bytes(&self, buffer: &mut [u8]) {
-        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
-    }
+macro_rules! impl_numeric_ftb {
+    ($($n:ident),+) => {
+        $(
+            impl FromBytes for $n {
+                fn from_bytes(buffer: &[u8]) -> Self {
+                    Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
+                }
+            }
+            impl ToBytes for $n {
+                fn to_bytes(&self, buffer: &mut [u8]) {
+                    buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
+                }
+            }
+        )+
+    };
 }
 
-impl FromToBytes for u64 {
-    fn from_bytes(buffer: &[u8]) -> Self {
-        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
-    }
-    fn to_bytes(&self, buffer: &mut [u8]) {
-        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
-    }
+// I just realized, we don't want impl for usize or isize, since those aren't portable
+
+impl_numeric_ftb!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128);
+
+macro_rules! impl_tuple_ftb {
+    ($start:ident, $($rem:ident),+) => {
+        impl_tuple_ftb!(do_impl $start, $($rem),+);
+        impl_tuple_ftb!($($rem),+);
+    };
+    (do_impl $($n:ident),+) => {
+        #[allow(non_snake_case, unused_assignments)]
+        impl<$($n: FromBytes),+> FromBytes for ($($n),+ ,) {
+            fn from_bytes(buffer: &[u8]) -> Self {
+                let mut offset = 0;
+                $(
+                    let $n = $n::from_bytes(&buffer[offset..]);
+                    offset += size_of::<$n>();
+                )+
+                ($($n),+ ,)
+            }
+        }
+
+        #[allow(non_snake_case, unused_assignments)]
+        impl<$($n: ToBytes),+> ToBytes for ($($n),+ ,) {
+            fn to_bytes(&self, buffer: &mut [u8]) {
+                let ($($n),+ ,) = self;
+                let mut offset = 0;
+                $(
+                    $n.to_bytes(&mut buffer[offset..]);
+                    offset += size_of::<$n>();
+                )+
+            }
+        }
+
+    };
+    ($start:ident) => {
+        impl_tuple_ftb!(do_impl $start);
+    };
 }
 
-impl FromToBytes for u128 {
-    fn from_bytes(buffer: &[u8]) -> Self {
-        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
-    }
-    fn to_bytes(&self, buffer: &mut [u8]) {
-        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
-    }
-}
-
-impl FromToBytes for usize {
-    fn from_bytes(buffer: &[u8]) -> Self {
-        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
-    }
-    fn to_bytes(&self, buffer: &mut [u8]) {
-        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
-    }
-}
-
-impl FromToBytes for i8 {
-    fn from_bytes(buffer: &[u8]) -> Self {
-        buffer[0] as Self
-    }
-    fn to_bytes(&self, buffer: &mut [u8]) {
-        buffer[0] = *self as u8;
-    }
-}
-
-impl FromToBytes for i16 {
-    fn from_bytes(buffer: &[u8]) -> Self {
-        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
-    }
-    fn to_bytes(&self, buffer: &mut [u8]) {
-        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
-    }
-}
-
-impl FromToBytes for i32 {
-    fn from_bytes(buffer: &[u8]) -> Self {
-        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
-    }
-    fn to_bytes(&self, buffer: &mut [u8]) {
-        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
-    }
-}
-
-impl FromToBytes for i64 {
-    fn from_bytes(buffer: &[u8]) -> Self {
-        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
-    }
-    fn to_bytes(&self, buffer: &mut [u8]) {
-        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
-    }
-}
-
-impl FromToBytes for i128 {
-    fn from_bytes(buffer: &[u8]) -> Self {
-        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
-    }
-    fn to_bytes(&self, buffer: &mut [u8]) {
-        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
-    }
-}
-
-impl FromToBytes for isize {
-    fn from_bytes(buffer: &[u8]) -> Self {
-        Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
-    }
-    fn to_bytes(&self, buffer: &mut [u8]) {
-        buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
-    }
-}
+impl_tuple_ftb!(T7, T6, T5, T4, T3, T2, T1, T0);

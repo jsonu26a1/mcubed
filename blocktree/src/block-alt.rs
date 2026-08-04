@@ -5,7 +5,7 @@ use std::ops::Deref;
 use std::rc::Rc;
 use std::slice;
 
-use super::{BlockIndex, BlockManager, WeakBlockManager, FromToBytes};
+use super::{BlockIndex, WeakBlockManager, FromBytes, ToBytes};
 
 #[derive(Clone)]
 pub struct BlockBuffer {
@@ -21,6 +21,10 @@ impl BlockBuffer {
             index,
             manager: Rc::new(Cell::new(manager)),
         }
+    }
+
+    pub fn index(&self) -> BlockIndex {
+        self.index
     }
 
     pub fn reader(&self) -> BlockReader<'_> {
@@ -55,11 +59,11 @@ impl<'a> BlockReader<'a> {
         }
     }
 
-    pub fn at<T: FromToBytes>(&self, offset: usize) -> T {
+    pub fn at<T: FromBytes>(&self, offset: usize) -> T {
         T::from_bytes(&unsafe { slice::from_raw_parts(self.ptr.cast::<u8>(), self.ptr.len()) }[offset..offset + size_of::<T>()])
     }
 
-    pub fn at_and<T: FromToBytes>(&self, offset: &mut usize) -> T {
+    pub fn at_and<T: FromBytes>(&self, offset: &mut usize) -> T {
         let value = self.at(*offset);
         *offset += size_of::<T>();
         value
@@ -88,11 +92,11 @@ impl<'a> BlockWriter<'a> {
         }
     }
 
-    pub fn at<T: FromToBytes>(&mut self, offset: usize, value: T) {
+    pub fn at<T: ToBytes>(&mut self, offset: usize, value: T) {
         value.to_bytes(&mut unsafe { slice::from_raw_parts_mut(self.ptr.cast::<u8>(), self.ptr.len()) }[offset..offset + size_of::<T>()]);
     }
 
-    pub fn at_and<T: FromToBytes>(&mut self, offset: &mut usize, value: T) {
+    pub fn at_and<T: ToBytes>(&mut self, offset: &mut usize, value: T) {
         self.at(*offset, value);
         *offset += size_of::<T>();
     }
