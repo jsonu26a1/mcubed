@@ -22,6 +22,10 @@ impl BlockBuffer {
         self.0.index
     }
 
+    pub fn buffer_len(&self) -> usize {
+        self.0.buffer.borrow().len()
+    }
+
     pub fn reader(&self) -> BlockReader<'_> {
         BlockReader(Ref::map(self.0.buffer.borrow(), |b| &**b))
     }
@@ -37,7 +41,7 @@ impl BlockBuffer {
     }
 
     // marked as unsafe because this type's API is designed to avoid slices into the buffer.
-    // calls to BlockBuffer::write() must not occur while the slice exists.
+    // calls to BlockBuffer::writer() must not occur while the slice exists.
     pub(crate) unsafe fn as_slice(&self) -> impl Deref<Target=[u8]> {
         Ref::map(self.0.buffer.borrow(), |b| &**b)
     }
@@ -54,7 +58,7 @@ struct BlockBufferInner {
     modified: Cell<bool>,
 }
 
-pub struct BlockReader<'a>(pub Ref<'a, [u8]>);
+pub struct BlockReader<'a>(Ref<'a, [u8]>);
 
 impl<'a> BlockReader<'a> {
     pub fn at<T: FromBytes>(&self, offset: usize) -> T {
@@ -77,7 +81,7 @@ impl<'a> BlockReader<'a> {
     }
 }
 
-pub struct BlockWriter<'a>(pub RefMut<'a, [u8]>);
+pub struct BlockWriter<'a>(RefMut<'a, [u8]>);
 
 impl<'a> BlockWriter<'a> {
     pub fn at<T: ToBytes>(&mut self, offset: usize, value: T) {

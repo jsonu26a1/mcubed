@@ -30,6 +30,10 @@ impl BlockBuffer {
         self.index
     }
 
+    pub fn buffer_len(&self) -> usize {
+        self.ptr.len()
+    }
+
     pub fn reader(&self) -> BlockReader<'_> {
         BlockReader::new(self.ptr)
     }
@@ -45,7 +49,7 @@ impl BlockBuffer {
     }
 
     // marked as unsafe because this type's API is designed to avoid slices into the buffer.
-    // calls to BlockBuffer::write() must not occur while the slice exists.
+    // calls to BlockBuffer::writer() must not occur while the slice exists.
     pub(crate) unsafe fn as_slice(&self) -> impl Deref<Target=[u8]> {
         unsafe { slice::from_raw_parts(self.ptr.cast::<u8>(), self.ptr.len()) }
     }

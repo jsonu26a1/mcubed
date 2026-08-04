@@ -175,14 +175,15 @@ impl<T: ToBytes> ToBytes for &[T] {
 macro_rules! impl_numeric_ftb {
     ($($n:ident),+) => {
         $(
+            // little-endian makes the most sense here, to be honest.
             impl FromBytes for $n {
                 fn from_bytes(buffer: &[u8]) -> Self {
-                    Self::from_be_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
+                    Self::from_le_bytes(buffer[0..size_of::<Self>()].try_into().unwrap())
                 }
             }
             impl ToBytes for $n {
                 fn to_bytes(&self, buffer: &mut [u8]) {
-                    buffer[0..size_of::<Self>()].copy_from_slice(self.to_be_bytes().as_slice());
+                    buffer[0..size_of::<Self>()].copy_from_slice(self.to_le_bytes().as_slice());
                 }
             }
         )+

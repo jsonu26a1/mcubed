@@ -1,7 +1,11 @@
+use std::cell::Cell;
+use std::io::Result as IoResult;
+use std::marker::PhantomData;
 use std::mem::size_of;
 use std::rc::Rc;
+use std::cmp::{Ord, Ordering};
 
-use super::{BlockIndex, BLOCK_INDEX_SIZE, BLOCK_SIZE, BlockManager, BlockBuffer};
+use super::{BlockIndex, BlockManager, BlockBuffer, FromBytes, ToBytes};
 
 // pub enum DataType {
 //     Inline(u32),
@@ -22,7 +26,7 @@ this file format.
 */
 
 pub struct BTree {
-    root_block: BlockIndex,
+    root_block: BlockBuffer,
     manager: BlockManager,
     height: u32,
     len: u64,
@@ -30,68 +34,93 @@ pub struct BTree {
     // value_type: DataType,
 }
 
-impl BTree {}
+// encoding in block:
+// (len: u64, height: u32, root_node: [..])
+impl BTree {
+    pub fn new(manager: BlockManager, root_index: BlockIndex) -> IoResult<Self> {
+        let root_block = manager.read_block(root_index)?;
+        let (len, height) = root_block.reader().at(0);
+        Ok(Self {
+            root_block,
+            manager,
+            height,
+            len,
+        })
+    }
 
-/*
-hmmm, I wonder how we should handle the Internal/LeafNode APIs; for fetching a key from the BTree,
-we mostly just need InternalNode's get_key(), get_edge(), and LeafNode's get(); but with insert()
-and remove(), we'll want to manipulate entire lists (keys, edges, values). we could have an
-methods on the Nodes that fill a `&mut Vec`, allowing BTree to manipulate, then another method to
-write the new lists back. although, we will also want to be changing the length
-*/
+    fn root_node_offset(&self) -> usize {
+        size_of::<(u64, u32)>()
+    }
 
-enum EitherNode {
-    Internal(Rc<InternalNode>),
-    Leaf(Rc<LeafNode>),
+    pub fn get(&self, search_key: u64) -> IoResult<Option<u64>> {
+        if self.height == 0 {
+            let leaf = LeafNode::<u64, u64>::new(self.root_block.clone(), self.root_node_offset());
+            // binary search: start
+            let mut upper = leaf.len;
+            let mut lower = 0;
+            let mut index;
+            let mut key;
+            loop {
+                index = lower + (upper - lower) / 2;
+                key = leaf.get_key(index);
+                if lower >= index {
+                    break;
+                }
+                match search_key.cmp(&key) {
+                    Ordering::Less => upper = index,
+                    Ordering::Equal => break,
+                    Ordering::Greater => lower = index,
+                }
+            }
+            // binary search: end
+            return Ok(if key != search_key {
+                None
+            } else {
+                Some(leaf.get_value(index))
+            })
+        }
+        todo!();
+    }
+
+    pub fn insert(&mut self, key: u64, value: u64) -> IoResult<Option<u64>> {
+        todo!();
+    }
+
+    pub fn remove(&mut self, key: u64) -> IoResult<Option<u64>> {
+        todo!();
+    }
 }
 
-impl EitherNode {
-    fn internal(self) -> Rc<InternalNode> {
-        match self {
-            Self::Internal(n) => n,
-            Self::Leaf(_) => {
-                panic!("EitherNode access failed: expected InternalNode, found LeafNode")
-            }
-        }
-    }
-
-    fn leaf(self) -> Rc<LeafNode> {
-        match self {
-            Self::Internal(_) => {
-                panic!("EitherNode access failed: expected LeafNode, found InternalNode")
-            }
-            Self::Leaf(n) => n,
-        }
-    }
-
-    fn block_index(&self) -> BlockIndex {
-        match self {
-            Self::Internal(n) => n.block.index(),
-            Self::Leaf(n) => n.block.index(),
-        }
-    }
-}
-
-// TODO: need From impls for EitherNode
-
-struct InternalNode {
+struct InternalNode<K> {
     block: BlockBuffer,
+    offset: usize,
     len: usize,
+    _p: PhantomData<K>
 }
 
 // these fields are encoded in the block buffer:
 // (len: u32, keys: [u64; len], edges: [BlockIndex; len])
-impl InternalNode {
+impl<K: FromBytes + ToBytes> InternalNode<K> {
+    fn new(block: BlockBuffer, offset: usize) -> Self {
+        let len = block.reader().at::<u32>(offset) as usize;
+        Self {
+            block,
+            offset,
+            len,
+            _p: PhantomData,
+        }
+    }
+
     fn key_offset(&self, index: usize) -> usize {
-        size_of::<u32>() + index * size_of::<u64>()
+        self.offset + size_of::<u32>() + index * size_of::<K>()
     }
 
     fn edge_offset(&self, index: usize) -> usize {
         // NOTE: length == number of edges, and number of keys will be `length - 1`
-        self.key_offset(self.len) + index * BLOCK_INDEX_SIZE
+        self.key_offset(self.len) + index * size_of::<BlockIndex>()
     }
 
-    fn get_key(&self, index: usize) -> u64 {
+    fn get_key(&self, index: usize) -> K {
         self.block.reader().at(self.key_offset(index))
     }
 
@@ -99,48 +128,98 @@ impl InternalNode {
         self.block.reader().at(self.edge_offset(index))
     }
 
-    fn set_key(&self, index: usize, key: u64) {
+    fn get_keys_edges(&self, keys: &mut Vec<K>, edges: &mut Vec<BlockIndex>) {
+        let reader = self.block.reader();
+        let mut key_offset = self.key_offset(0);
+        let mut edge_offset = self.edge_offset(0);
+        for _ in 0..self.len - 1 {
+            keys.push(reader.at(key_offset));
+            key_offset += size_of::<K>();
+            edges.push(reader.at(edge_offset));
+            edge_offset += size_of::<BlockIndex>();
+        }
+        edges.push(reader.at(edge_offset));
+    }
+
+    fn set_key(&self, index: usize, key: K) {
         self.block.writer().at(self.edge_offset(index), key);
     }
 
     // hmmm.. I don't think we actually need this method
-    fn set_edge(&self, index: usize, edge: BlockIndex) {
-        self.block.writer().at(self.edge_offset(index), edge);
-    }
+    // fn set_edge(&self, index: usize, edge: BlockIndex) {
+    //     self.block.writer().at(self.edge_offset(index), edge);
+    // }
 
-    fn set_keys_edges(&self, keys: &[u64], edges: &[BlockIndex]) {
+    fn set_keys_edges(&mut self, keys: &[K], edges: &[BlockIndex]) {
         assert!(keys.len() == edges.len() - 1);
-        let mut offset = 0;
-        // TODO we need a Cell<usize> for len
-        // self.len = edges.len();
-        let len = self.len as u32;
-        let mut writer = self.block.writer();
-        writer.at(0, (len, keys, edges));
+        self.len = edges.len();
+        self.block.writer().at(self.offset, (self.len as u32, keys, edges));
     }
 }
 
-struct LeafNode {
+struct LeafNode<K, V> {
     block: BlockBuffer,
+    offset: usize,
     len: usize,
+    _p: PhantomData<(K, V)>,
 }
 
 // encoding in block:
-// (len: u32, keys: [u64; len], values: [u64; len])
-impl LeafNode {
+// (len: u32, keys: [K; len], values: [V; len])
+impl<K: FromBytes + ToBytes, V: FromBytes + ToBytes> LeafNode<K, V> {
+    fn new(block: BlockBuffer, offset: usize) -> Self {
+        let len = block.reader().at::<u32>(offset) as usize;
+        Self {
+            block,
+            offset,
+            len,
+            _p: PhantomData,
+        }
+    }
+
     fn key_offset(&self, index: usize) -> usize {
-        size_of::<u32>() + index * size_of::<u64>()
+        self.offset + size_of::<u32>() + index * size_of::<K>()
     }
 
     fn value_offset(&self, index: usize) -> usize {
-        self.key_offset(self.len + 1) + index * size_of::<u64>()
+        self.key_offset(self.len + 1) + index * size_of::<V>()
     }
 
-    // get (key, value) at index
-    fn get(&self, index: usize) -> (u64, u64) {
+    fn get_key(&self, index: usize) -> K {
+        self.block.reader().at(self.key_offset(index))
+    }
+
+    fn get_value(&self, index: usize) -> V {
+        self.block.reader().at(self.value_offset(index))
+    }
+
+    fn get(&self, index: usize) -> (K, V) {
         let reader = self.block.reader();
         (
             reader.at(self.key_offset(index)),
             reader.at(self.value_offset(index))
         )
+    }
+
+    fn get_keys_values(&self, keys: &mut Vec<K>, values: &mut Vec<V>) {
+        let reader = self.block.reader();
+        let mut key_offset = self.key_offset(0);
+        let mut value_offset = self.value_offset(0);
+        for index in 0..self.len {
+            keys.push(reader.at(key_offset));
+            key_offset += size_of::<K>();
+            values.push(reader.at(value_offset));
+            value_offset += size_of::<V>();
+        }
+    }
+
+    fn set_value(&self, index: usize, value: V) {
+        self.block.writer().at(self.value_offset(index), value);
+    }
+
+    fn set_keys_values(&mut self, keys: &[K], values: &[V]) {
+        assert!(keys.len() == values.len());
+        self.len = values.len();
+        self.block.writer().at(self.offset, (self.len as u32, keys, values));
     }
 }
