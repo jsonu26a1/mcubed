@@ -9,23 +9,13 @@ use super::{BlockIndex, WeakBlockManager, FromBytes, ToBytes};
 pub struct BlockBuffer(Rc<BlockBufferInner>);
 
 impl BlockBuffer {
-    pub fn new(buffer: Box<[u8]>, index: BlockIndex, manager: Option<WeakBlockManager>) -> Self {
+    pub fn new(buffer: Box<[u8]>, index: BlockIndex, manager: WeakBlockManager) -> Self {
         Self(Rc::new(BlockBufferInner {
             buffer: RefCell::new(buffer),
             index,
-            manager: Cell::new(manager),
+            manager,
+            modified: Cell::new(false),
         }))
-    }
-
-    fn borrow(&self) -> Ref<'_, [u8]> {
-        Ref::map(self.0.buffer.borrow(), |b| &**b)
-    }
-
-    fn borrow_mut(&self) -> RefMut<'_, [u8]> {
-        if let Some(manager) = self.0.manager.replace(None).map(|w| w.upgrade()).flatten() {
-            manager.mark_block_as_modified(self.0.index);
-        }
-        RefMut::map(self.0.buffer.borrow_mut(), |b| &mut **b)
     }
 
     pub fn index(&self) -> BlockIndex {
@@ -33,28 +23,35 @@ impl BlockBuffer {
     }
 
     pub fn reader(&self) -> BlockReader<'_> {
-        BlockReader(self.borrow())
+        BlockReader(Ref::map(self.0.buffer.borrow(), |b| &**b))
     }
 
     pub fn writer(&self) -> BlockWriter<'_> {
-        BlockWriter(self.borrow_mut())
+        if !self.0.modified.get() {
+            self.0.modified.set(true);
+            if let Some(manager) = self.0.manager.upgrade() {
+                manager.mark_block_as_modified(self.0.index);
+            }
+        }
+        BlockWriter(RefMut::map(self.0.buffer.borrow_mut(), |b| &mut **b))
     }
 
     // marked as unsafe because this type's API is designed to avoid slices into the buffer.
     // calls to BlockBuffer::write() must not occur while the slice exists.
     pub(crate) unsafe fn as_slice(&self) -> impl Deref<Target=[u8]> {
-        self.borrow()
+        Ref::map(self.0.buffer.borrow(), |b| &**b)
     }
 
-    pub(crate) fn set_manager(&self, manager: Option<WeakBlockManager>) {
-        self.0.manager.set(manager);
+    pub(crate) fn set_modified(&self, modified: bool) {
+        self.0.modified.set(modified);
     }
 }
 
 struct BlockBufferInner {
     buffer: RefCell<Box<[u8]>>,
     index: BlockIndex,
-    manager: Cell<Option<WeakBlockManager>>,
+    manager: WeakBlockManager,
+    modified: Cell<bool>,
 }
 
 pub struct BlockReader<'a>(pub Ref<'a, [u8]>);

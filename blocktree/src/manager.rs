@@ -44,7 +44,7 @@ impl BlockManager {
                 let mut buffer = vec![];
                 buffer.resize(BLOCK_SIZE, 0);
                 inner.backend.read(index * BLOCK_SIZE as u64, &mut buffer)?;
-                let buffer = BlockBuffer::new(buffer.into_boxed_slice(), index, Some(self.downgrade()));
+                let buffer = BlockBuffer::new(buffer.into_boxed_slice(), index, self.downgrade());
                 ve.insert(buffer.clone());
                 Ok(buffer)
             },
@@ -63,7 +63,7 @@ impl BlockManager {
         let inner = &mut *self.inner.borrow_mut();
         while let Some(index) = inner.modified.pop() {
             let buffer = inner.cache.get_mut(&index).unwrap();
-            buffer.set_manager(Some(self.downgrade()));
+            buffer.set_modified(false);
             inner.backend.write(index * BLOCK_SIZE as u64, unsafe { buffer.as_slice() }.deref())?;
         }
         Ok(())

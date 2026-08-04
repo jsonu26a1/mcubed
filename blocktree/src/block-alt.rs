@@ -11,15 +11,18 @@ use super::{BlockIndex, WeakBlockManager, FromBytes, ToBytes};
 pub struct BlockBuffer {
     ptr: *mut [u8],
     index: BlockIndex,
-    manager: Rc<Cell<Option<WeakBlockManager>>>,
+    inner: Rc<BlockBufferInner>,
 }
 
 impl BlockBuffer {
-    pub fn new(buffer: Box<[u8]>, index: BlockIndex, manager: Option<WeakBlockManager>) -> Self {
+    pub fn new(buffer: Box<[u8]>, index: BlockIndex, manager: WeakBlockManager) -> Self {
         Self {
             ptr: Box::into_raw(buffer),
             index,
-            manager: Rc::new(Cell::new(manager)),
+            inner: Rc::new(BlockBufferInner {
+                mananger,
+                modified: Cell::new(false),
+            }),
         }
     }
 
@@ -32,6 +35,12 @@ impl BlockBuffer {
     }
 
     pub fn writer(&self) -> BlockWriter<'_> {
+        if !self.inner.modified.get() {
+            self.inner.modified.set(true);
+            if let Some(mananger) = self.inner.mananger.upgrade() {
+                manager.mark_block_as_modified(self.index);
+            }
+        }
         BlockWriter::new(self.ptr)
     }
 
@@ -41,9 +50,22 @@ impl BlockBuffer {
         unsafe { slice::from_raw_parts(self.ptr.cast::<u8>(), self.ptr.len()) }
     }
 
-    pub(crate) fn set_manager(&self, manager: Option<WeakBlockManager>) {
-        self.manager.set(manager);
+    pub(crate) fn set_modified(&self, modified: bool) {
+        self.inner.modified.set(modified);
     }
+}
+
+impl Drop for BlockBuffer {
+    fn drop(&mut self) {
+        if Rc::strong_count(self.inner) == 1 {
+            drop(unsafe { Box::from_raw(self.ptr) });
+        }
+    }
+}
+
+struct BlockBufferInner {
+    manager: WeakBlockManager,
+    modified: Cell<bool>,
 }
 
 pub struct BlockReader<'a> {
