@@ -101,8 +101,6 @@ struct BlockManagerInner {
     root_header: RootHeader,
 }
 
-// pub type WeakBlockManager = Weak<RefCell<BlockManagerInner>>;
-
 #[derive(Clone)]
 pub struct WeakBlockManager(Weak<RefCell<BlockManagerInner>>);
 
@@ -162,16 +160,6 @@ impl<T: ToBytes> ToBytes for &T {
     }
 }
 
-impl<T: ToBytes> ToBytes for &[T] {
-    fn to_bytes(&self, buffer: &mut [u8]) {
-        let mut offset = 0;
-        for t in *self {
-            t.to_bytes(&mut buffer[offset..]);
-            offset += size_of::<T>();
-        }
-    }
-}
-
 macro_rules! impl_numeric_ftb {
     ($($n:ident),+) => {
         $(
@@ -190,7 +178,7 @@ macro_rules! impl_numeric_ftb {
     };
 }
 
-// I just realized, we don't want impl for usize or isize, since those aren't portable
+// don't impl for non-portable usize or isize
 
 impl_numeric_ftb!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128);
 
