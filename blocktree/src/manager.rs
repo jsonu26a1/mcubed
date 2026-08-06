@@ -160,6 +160,18 @@ impl<T: ToBytes> ToBytes for &T {
     }
 }
 
+// this is just for convenience; this doesn't writ out the count or length, it must be
+// done explicitly else where.
+impl<T: ToBytes> ToBytes for &[T] {
+    fn to_bytes(&self, buffer: &mut [u8]) {
+        let mut offset = 0;
+        for t in *self {
+            t.to_bytes(&mut buffer[offset..]);
+            offset += size_of::<T>();
+        }
+    }
+}
+
 macro_rules! impl_numeric_ftb {
     ($($n:ident),+) => {
         $(
