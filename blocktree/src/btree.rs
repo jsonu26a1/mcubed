@@ -79,6 +79,7 @@ impl BTree {
                 Some(leaf.get_value(index))
             })
         }
+        let internal = InternalNode::<u64, u64>::new(self.root_block.clone(), self.root_node_offset());
         todo!();
     }
 
@@ -118,6 +119,19 @@ impl<K: FromBytes + ToBytes> InternalNode<K> {
     fn edge_offset(&self, index: usize) -> usize {
         // NOTE: length == number of edges, and number of keys will be `length - 1`
         self.key_offset(self.len) + index * size_of::<BlockIndex>()
+    }
+
+    fn max_len(&self) -> usize {
+        let available = self.block.buffer_len() - self.key_offset(0);
+        // how many bytes B would L items take up? where size_of<K> = K, size_of<V> = V
+        // B = (L - 1) * K + L * V
+        // B =  L * K - K + L * V
+        // B = (K + V) * L - K
+        // B + K = (K + V) * L
+        // (B + K) / (K + V) = L
+        // so we use that formula to compute the maximum number of items that fit into B bytes
+        // math is fun even tho I'm bad at it.
+        (available + size_of::<K>()) / (size_of::<K>() + size_of::<V>())
     }
 
     fn get_key(&self, index: usize) -> K {
