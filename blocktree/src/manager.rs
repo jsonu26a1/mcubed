@@ -85,7 +85,7 @@ impl BlockManager {
         inner.modified.clear();
     }
 
-    pub fn alloc_block(&self) -> BlockIndex {
+    pub fn alloc_block(&self) -> IoResult<BlockBuffer> {
         todo!();
     }
 

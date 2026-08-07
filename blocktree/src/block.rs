@@ -1,6 +1,6 @@
 use std::cell::{RefCell, Ref, RefMut, Cell};
 use std::mem::size_of;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut, RangeBounds};
 use std::rc::Rc;
 
 use super::{BlockIndex, WeakBlockManager, FromBytes, ToBytes};
@@ -41,9 +41,15 @@ impl BlockBuffer {
     }
 
     // marked as unsafe because this type's API is designed to avoid slices into the buffer.
-    // calls to BlockBuffer::writer() must not occur while the slice exists.
+    // caller must not access the buffer via reader/writer until slices are dropped.
     pub(crate) unsafe fn as_slice(&self) -> impl Deref<Target=[u8]> {
         Ref::map(self.0.buffer.borrow(), |b| &**b)
+    }
+
+    // marked as unsafe because this type's API is designed to avoid slices into the buffer.
+    // caller must not access the buffer via reader/writer until slices are dropped.
+    pub(crate) unsafe fn as_mut_slice(&self) -> impl DerefMut<Target=[u8]> {
+        RefMut::map(self.0.buffer.borrow_mut(), |b| &mut **b)
     }
 
     pub(crate) fn set_modified(&self, modified: bool) {
@@ -100,5 +106,33 @@ impl<'a> BlockWriter<'a> {
     pub fn slice_and(&mut self, offset: &mut usize, slice: &[u8]) {
         self.slice(*offset, slice);
         *offset += slice.len();
+    }
+
+    pub fn copy_within(&mut self, src: impl RangeBounds<usize>, dest: usize) {
+        self.0.copy_within(src, dest)
+    }
+
+    #[allow(private_bounds)]
+    pub fn copy_from(&mut self, other: &impl ReaderOrWriter, src: impl RangeBounds<usize>, dest: usize) {
+        // the API for RangeBounds is so dumb
+        let r = (src.start_bound().map(|i| *i), src.end_bound().map(|i| *i));
+        let src_slice = &other.inner()[r];
+        self.0[dest..dest+src_slice.len()].copy_from_slice(src_slice);
+    }
+}
+
+trait ReaderOrWriter {
+    fn inner(&self) -> &[u8];
+}
+
+impl<'a> ReaderOrWriter for BlockReader<'a> {
+    fn inner(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl<'a> ReaderOrWriter for BlockWriter<'a> {
+    fn inner(&self) -> &[u8] {
+        &self.0
     }
 }

@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::mem::size_of;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut, RangeBounds};
 use std::rc::Rc;
 use std::slice;
 
@@ -20,7 +20,7 @@ impl BlockBuffer {
             ptr: Box::into_raw(buffer),
             index,
             inner: Rc::new(BlockBufferInner {
-                mananger,
+                manager,
                 modified: Cell::new(false),
             }),
         }
@@ -41,7 +41,7 @@ impl BlockBuffer {
     pub fn writer(&self) -> BlockWriter<'_> {
         if !self.inner.modified.get() {
             self.inner.modified.set(true);
-            if let Some(mananger) = self.inner.mananger.upgrade() {
+            if let Some(manager) = self.inner.manager.upgrade() {
                 manager.mark_block_as_modified(self.index);
             }
         }
@@ -49,9 +49,15 @@ impl BlockBuffer {
     }
 
     // marked as unsafe because this type's API is designed to avoid slices into the buffer.
-    // calls to BlockBuffer::writer() must not occur while the slice exists.
+    // caller must not access the buffer via reader/writer until slices are dropped.
     pub(crate) unsafe fn as_slice(&self) -> impl Deref<Target=[u8]> {
         unsafe { slice::from_raw_parts(self.ptr.cast::<u8>(), self.ptr.len()) }
+    }
+
+    // marked as unsafe because this type's API is designed to avoid slices into the buffer.
+    // caller must not access the buffer via reader/writer until slices are dropped.
+    pub(crate) unsafe fn as_mut_slice(&self) -> impl DerefMut<Target=[u8]> {
+        unsafe { slice::from_raw_parts_mut(self.ptr.cast::<u8>(), self.ptr.len()) }
     }
 
     pub(crate) fn set_modified(&self, modified: bool) {
@@ -61,7 +67,7 @@ impl BlockBuffer {
 
 impl Drop for BlockBuffer {
     fn drop(&mut self) {
-        if Rc::strong_count(self.inner) == 1 {
+        if Rc::strong_count(&self.inner) == 1 {
             drop(unsafe { Box::from_raw(self.ptr) });
         }
     }
@@ -135,5 +141,34 @@ impl<'a> BlockWriter<'a> {
         self.slice(*offset, slice);
         *offset += slice.len();
     }
+
+    pub fn copy_within(&mut self, src: impl RangeBounds<usize>, dest: usize) {
+        unsafe { slice::from_raw_parts_mut(self.ptr.cast::<u8>(), self.ptr.len()) }.copy_within(src, dest)
+    }
+
+    #[allow(private_bounds)]
+    pub fn copy_from(&mut self, other: &impl ReaderOrWriter, src: impl RangeBounds<usize>, dest: usize) {
+        let other = other.inner();
+        // the API for RangeBounds is so dumb
+        let r = (src.start_bound().map(|i| *i), src.end_bound().map(|i| *i));
+        let src_slice = &unsafe { slice::from_raw_parts(other.cast::<u8>(), other.len()) }[r];
+        (unsafe { slice::from_raw_parts_mut(self.ptr.cast::<u8>(), self.ptr.len())
+            })[dest..dest+src_slice.len()].copy_from_slice(src_slice);
+    }
 }
 
+trait ReaderOrWriter {
+    fn inner(&self) -> *mut [u8];
+}
+
+impl<'a> ReaderOrWriter for BlockReader<'a> {
+    fn inner(&self) -> *mut [u8] {
+        self.ptr
+    }
+}
+
+impl<'a> ReaderOrWriter for BlockWriter<'a> {
+    fn inner(&self) -> *mut [u8] {
+        self.ptr
+    }
+}
