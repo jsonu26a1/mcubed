@@ -1,0 +1,12 @@
+2026-08-07
+==========
+
+hmmm, I just realized; look at the follow scenario in `btree.rs`. tree height is 0, so the root_block/node is a LeafNode. when we're inserting a new item (key/value pair), and the leaf's len is greater than max_len, we need to "split" the items between two leaf nodes so there's room for the new item. however, nodes in the root slot have a smaller available buffer (since they share the root block with other metadata about the overall tree, like tree's len, height, etc). so when we split the items into two new leaf nodes (non-root_block), both nodes will have less than than the minimum number of items after the split. this issue also occurs with InternalNodes.
+
+how should we handle this? when the root node "overflows", we could move the node into a non-root node, which would give it a bit more "space", and replace it with a new InternalNode which has a single edge, that node we just moved out. this would "save space", we're only allocating 1 block, vs 2 if we split the node in two; however, this InternalNode would be very "weird"; with a single edge, it would have zero keys (keys only occur between each pair of edges; one after every edge, except the last edge). this would require strange special-case handling for our algorithms.
+
+for example, how does binary_search() react when there's zero keys? for InternalNode's, BTree.get() doesn't have any issues; it just returns index 0, which corresponds to that single edge. looking at SampleTree: insert(), we're updating keys in a parent node only when the index is in the range of keys; since keys is empty (len is 0), it looks safe. for remove(), we would reach that `unreachable!()` condition, where there's no left or right sibling to merge or balance with. we would need a special case (for both Leaf and Internal nodes) for when there's no siblings. what we should do in those cases, is check if we could move that lone node back into the root_block.
+
+this edge case is quite complicated. I'll have to spend some time going over the different scenarios and states in more detail. maybe it would make sense to just implement a simple case for now? like putting the root node in it's own block instead of trying to worry about the more complicated case of when the root node is in the tree's root_block and has a lower max_len()...
+
+after we have a working implementation for the simpler setup, we can try implementing this other setup, that's more complicated, but potentially better optimized.

@@ -29,58 +29,53 @@ pub struct BTree {
     root_block: BlockBuffer,
     manager: BlockManager,
     modified: bool,
-    len: u64,
     height: u32,
-    root_node_block: BlockBuffer,
+    len: u64,
     // key_type: DataType,
     // value_type: DataType,
 }
 
 // encoding in block:
-// (len: u64, height: u32, root_node_index: BlockIndex)
-// NOTE: for now, the root_node is in it's own separate block (at root_node_index),
-// but eventually the root_node's buffer will be stored inside the tree's root_block
-// in the unused space at the end of the buffer.
+// (len: u64, height: u32, root_node: [..])
 impl BTree {
     pub fn new(manager: BlockManager, root_index: BlockIndex) -> IoResult<Self> {
         let root_block = manager.read_block(root_index)?;
-        let (len, height, root_node_index) = root_block.reader().at(0);
-        let root_node_block = manager.read_block(root_node_index)?;
+        let (len, height) = root_block.reader().at(0);
         Ok(Self {
             root_block,
             manager,
             modified: false,
-            len,
             height,
-            root_node_block,
+            len,
         })
     }
 
-    fn update_root_block(&self) {
-        self.root_block.writer().at(0, (self.len, self.height, self.root_node_block.index()));
+    fn root_node_offset(&self) -> usize {
+        size_of::<(u64, u32)>()
     }
 
-    fn set_len(&mut self, len: u64) {
-        self.root_block.writer().at(0, len);
-        self.len = len
-    }
-
-    fn set_height(&mut self, height: u32) {
-        self.root_block.writer().at(size_of::<u64>(), height);
-        self.height = height;
-    }
-
-    fn set_root_node_block(&mut self, root_node_block: BlockBuffer) {
-        self.root_block.writer().at(size_of::<(u64, u32)>(), root_node_block.index());
-        self.root_node_block = root_node_block;
+    fn find_leaf(&self, key: u64) -> IoResult<(LeafNode<u64, u64>, Result<usize, usize>)> {
+        let mut height = 0;
+        let mut cursor = self.root_block.clone();
+        let mut offset = self.root_node_offset();
+        while height < self.height {
+            let internal = InternalNode::<u64>::new(cursor, offset);
+            if height == 0 {
+                offset = 0;
+            }
+            height += 1;
+            let i = binary_search(key, internal.len, |i| internal.get_key(i)).map_or_else(|i| i, |i| i);
+            cursor = self.manager.read_block(internal.get_edge(i))?;
+        }
+        let leaf = LeafNode::<u64, u64>::new(cursor, offset);
+        let index = binary_search(key, leaf.len, |i| leaf.get_key(i));
+        Ok((leaf, index))
     }
 
     pub fn get(&self, key: u64) -> IoResult<Option<u64>> {
         let mut height = 0;
-        let mut cursor = self.root_node_block.clone();
-        // offset is unused at the moment, see above NOTE about root_node.
-        // let mut offset = self.root_node_offset();
-        let mut offset = 0;
+        let mut cursor = self.root_block.clone();
+        let mut offset = self.root_node_offset();
         while height < self.height {
             let internal = InternalNode::<u64>::new(cursor, offset);
             if height == 0 {
@@ -95,13 +90,10 @@ impl BTree {
     }
 
     pub fn insert(&mut self, key: u64, value: u64) -> IoResult<Option<u64>> {
-        self.set_len(self.len + 1);
         let mut height = 0;
-        let mut cursor = self.root_node_block.clone();
+        let mut cursor = self.root_block.clone();
         let mut parents = vec![];
-        // offset is unused at the moment, see above NOTE about root_node.
-        // let mut offset = self.root_node_offset();
-        let mut offset = 0;
+        let mut offset = self.root_node_offset();
         while height < self.height {
             let internal = InternalNode::<u64>::new(cursor, offset);
             if height == 0 {
@@ -122,6 +114,7 @@ impl BTree {
             },
             Err(i) => i,
         };
+        self.len += 1;
         let mut parents = parents.into_iter().rev();
 
         let inserted_at_child_end = i == leaf.len;
@@ -146,18 +139,9 @@ impl BTree {
             // insert new key/value
             writer.at(leaf.key_offset(i), key);
             writer.at(leaf.value_offset(i), value);
-            if inserted_at_child_end {
-                // update parent's key
-                for (parent, i) in parents {
-                    if i < parent.len - 1 {
-                        // update key and exit loop
-                        parent.set_key(i, key);
-                        break;
-                    }
-                }
-            }
             return Ok(None);
         }
+
 
         // NOTE: we're at max_len, there's no room to insert-then-split, we must split first
         let mut left = leaf;
@@ -170,46 +154,53 @@ impl BTree {
         let left_new_len = mid;
         r_writer.at(right.len_offset(), right.len as u32);
 
-        // split left at mid into right
+        // we don't need unsafe block.as_slice() now that we have writer.copy_from
+        /*
         if i < mid {
             // insert i in left
-            r_writer.copy_from(&l_writer, left.key_offset(mid)..left.key_offset(left.len), right.key_offset(0));
-            r_writer.copy_from(&l_writer, left.value_offset(mid)..left.value_offset(left.len), right.value_offset(0));
-            // make room in left to insert key/value
-            l_writer.copy_within(left.key_offset(i)..left.key_offset(mid), left.key_offset(i + 1));
-            l_writer.copy_within(left.value_offset(i)..left.value_offset(mid), left.value_offset(i + 1));
-            l_writer.at(left.key_offset(i), key);
-            l_writer.at(left.value_offset(i), value);
+            {
+                // safety: we don't access left until after the slice is dropped
+                let l_slice = unsafe { left.block.as_slice() };
+                r_writer.slice(
+                    right.key_offset(0)..right.key_offset(right.len),
+                    &l_slice[left.key_offset(mid)..left.key_offset(left.len)]
+                );
+                // make room in left to insert key/value
+                // since we already have a direct slice, just use that for copy_within()
+                l_slice.copy_within(left.key_offset(i)..left.key_offset(mid), left.key_offset(i + 1));
+            }
         } else {
             // insert i in right
             // p: the position in right where we're inserting new key/value
             let p = i - mid;
-            if p > 0 {
-                r_writer.copy_from(&l_writer, left.key_offset(mid)..left.key_offset(i), right.key_offset(0));
-                r_writer.copy_from(&l_writer, left.value_offset(mid)..left.value_offset(i), right.value_offset(0));
-            }
-            r_writer.copy_from(&l_writer, left.key_offset(i)..left.key_offset(left.len), right.key_offset(p + 1));
-            r_writer.copy_from(&l_writer, left.value_offset(i)..left.value_offset(left.len), right.value_offset(p + 1));
-            r_writer.at(right.key_offset(i), key);
-            r_writer.at(right.value_offset(i), value);
-        }
-
-        // TODO: this is kind of messy, should Nodes have a method to do this? was also done for `right.len`
-        l_writer.at(left.len_offset(), left_new_len as u32);
-        left.len = left_new_len;
-
-        loop {
-            let (parent, i) = match parents.next() {
-                Some(t) => t,
-                None => {
-                    // if let Some((left_edge, right_edge))
-                    todo!();
+            {
+                // safety: we don't access left until after the slice is dropped
+                let l_slice = unsafe { left.block.as_slice() };
+                if p > 0 {
+                    r_writer.slice(
+                        right.key_offset(0)..right.key_offset(p),
+                        &l_slice[left.key_offset(mid)..left.key_offset(i)]
+                    );
                 }
-            };
+                r_writer.slice(
+                    right.key_offset(p + 1)..right.key_offset(right.len),
+                    &l_slice[left.key_offset(i)..left.key_offset(left.len)]
+                );
+            }
+        }
+        */
+
+        // ...
+
+        if height == 0 {
+            // edge case: if height == 0, leaf is inside root_block, so we must move it out into
+            // *another* new leaf, and the space within root_block will become an InternalNode
             todo!();
+            return Ok(None);
         }
 
-        return Ok(None);
+        // ... next, we need to update parent(s)
+        todo!();
     }
 
     pub fn remove(&mut self, key: u64) -> IoResult<Option<u64>> {
